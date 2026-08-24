@@ -7,7 +7,7 @@ from robomaster import robot
 # CONFIG — ตั้งค่าความเร็วและระบบ
 # =====================================================================
 BASE_SPEED      = 0.18     # ความเร็วเดินหน้า (m/s)
-TURN_SPEED      = 45       # ความเร็วหมุนตอนเลี้ยว (deg/s)
+TURN_SPEED      = 65       # ความเร็วหมุนตอนเลี้ยว (deg/s)
 
 FRONT_WALL_THRES_MM = 280  # ToF ด้านหน้า: น้อยกว่า 28 ซม. ถือว่ามีกำแพง
 SIDE_WALL_THRES_CM  = 42.0 # Sharp ด้านข้าง: น้อยกว่า 42 ซม. ถือว่ามีกำแพง
@@ -128,97 +128,88 @@ def stop_robot():
 
 def align_front_wall(target_mm=TARGET_FRONT_MM):
     """
-    Feature A: จัดระยะห่างจากกำแพงหน้าให้อยู่กึ่งกลางช่องพอดีเป๊ะ (เช่น 20 ซม.) ก่อนเลี้ยว
+    Feature A: จัดระยะห่างจากกำแพงหน้าให้อยู่กึ่งกลางช่องพอดีเป๊ะ (~20 ซม.) ก่อนเลี้ยว
     """
     s = read_all_sensors()
-    if s["tof_front_mm"] > 350 or s["tof_front_mm"] < 40:
+    cur = s["tof_front_mm"]
+    if cur > 350 or cur < 60:
         return # ไม่ได้อยู่ใกล้กำแพงหน้า ไม่ต้องปรับ
         
-    print(f"[ALIGN] Calibrating distance to front wall -> Target: {target_mm}mm")
-    for _ in range(8):
+    print(f"[ALIGN] Calibrating distance to front wall -> Target: {target_mm}mm (Current: {cur}mm)")
+    for _ in range(10):
         s = read_all_sensors()
         err_mm = s["tof_front_mm"] - target_mm
-        if abs(err_mm) < 15: # คลาดเคลื่อนไม่เกิน 1.5 ซม. ถือว่าเป๊ะแล้ว
+        if abs(err_mm) < 18: # คลาดเคลื่อนไม่เกิน 1.8 ซม. ถือว่าเป๊ะแล้ว
             break
             
-        adj_speed = 0.10 if err_mm > 0 else -0.10
+        adj_speed = 0.08 if err_mm > 0 else -0.08
         ep_chassis.drive_speed(x=adj_speed, y=0, z=0, timeout=0.1)
-        time.sleep(0.08)
+        time.sleep(0.06)
         
     stop_robot()
-    time.sleep(0.05)
+    time.sleep(0.1)
 
 def turn(angle_deg):
     stop_robot()
     time.sleep(0.1)
     try:
         action = ep_chassis.move(x=0, y=0, z=angle_deg, z_speed=TURN_SPEED)
-        action.wait_for_completed(timeout=4)
+        action.wait_for_completed(timeout=6) # เพิ่ม Timeout เป็น 6 วินาทีเพื่อให้หมุน 180 องศาได้ครบ
     except Exception as e:
         print(f"\n[WARN] Turn blocked. ({e})")
     time.sleep(0.1)
 
 def turn_to_heading(current_heading, target_heading):
-    """หมุนหุ่นไปยังทิศที่ต้องการ พร้อมชดเชยองศา (Yaw Correction) ด้วย IMU"""
+    """หมุนตัวไปยังทิศทางเป้าหมายด้วยระบบ Closed-Loop IMU 100% จนกว่าจะตรงเป๊ะ (<= 1.5°)"""
     diff = (target_heading - current_heading) % 4
     if diff == 0:
         return current_heading
     
     stop_robot()
-    time.sleep(0.5) # พัก 0.5 วินาทีก่อนเริ่มหมุน
+    time.sleep(0.2)
     
     # Feature A: ถ้าด้านหน้ามีกำแพง ให้จัดระยะกึ่งกลางช่องก่อนเริ่มเลี้ยว
     s = read_all_sensors()
     if s["tof_front_mm"] < FRONT_WALL_THRES_MM:
         align_front_wall(TARGET_FRONT_MM)
 
-    # ป้องกันท้ายฟาดกำแพงตอนกลับตัว 180 องศา
-    s = read_all_sensors()
-    if diff == 2 and s["tof_front_mm"] < 190:
-        print("[SAFETY] Backing up slightly before 180-deg turn...")
-        try:
-            ep_chassis.move(x=-0.08, y=0, z=0, xy_speed=0.15).wait_for_completed(timeout=2)
-            time.sleep(0.5)
-        except Exception:
-            pass
-
-    angle = 0
-    if diff == 1: angle = -90   # เลี้ยวขวา
-    elif diff == 2: angle = 180 # กลับหลังหัน
-    elif diff == 3: angle = 90  # เลี้ยวซ้าย
+    target_rel_yaw = target_heading * -90.0
+    if target_rel_yaw <= -180: target_rel_yaw += 360
+    
+    print(f"[TURN] Rotating from Heading {current_heading} -> {target_heading} (Target Yaw: {target_rel_yaw:.1f}°)")
+    
+    # Closed-Loop IMU Rotation Controller: หมุนและเช็คมุมแบบ Real-time
+    start_turn_time = time.time()
+    while time.time() - start_turn_time < 5.0:
+        yaw_error = target_rel_yaw - get_relative_yaw()
+        if yaw_error > 180: yaw_error -= 360
+        elif yaw_error < -180: yaw_error += 360
         
-    if angle != 0:
-        print(f"[TURN] Turning {angle} deg -> Target Heading {target_heading}")
-        turn(angle)
-        
-        target_rel_yaw = target_heading * -90.0
-        if target_rel_yaw <= -180: target_rel_yaw += 360
-        
-        # Fine-tune ด้วย IMU ให้ตรงเป๊ะ
-        for _ in range(15):
-            yaw_error = target_rel_yaw - get_relative_yaw()
-            if yaw_error > 180: yaw_error -= 360
-            elif yaw_error < -180: yaw_error += 360
+        # เมื่อคลาดเคลื่อนไม่เกิน 1.5 องศา ถือว่าตรงเป๊ะแล้ว
+        if abs(yaw_error) <= 1.5:
+            break
             
-            if abs(yaw_error) < 3.0:
-                break
-                
-            corr_z = 15 if yaw_error > 0 else -15
-            ep_chassis.drive_speed(x=0, y=0, z=corr_z, timeout=0.1)
-            time.sleep(0.1)
+        # คำนวณความเร็วตามระยะมุมที่เหลือ (Proportional Control)
+        rot_speed = yaw_error * 1.5
+        rot_speed = max(-55, min(55, rot_speed)) # ลิมิตความเร็วสูงสุด
+        if abs(rot_speed) < 14: # กำลังขับขั้นต่ำเพื่อชนะแรงเสียดทานพื้น
+            rot_speed = 14 if yaw_error > 0 else -14
             
-        stop_robot()
-        time.sleep(0.5) # พัก 0.5 วินาทีหลังหมุนเสร็จ
+        ep_chassis.drive_speed(x=0, y=0, z=rot_speed, timeout=0.1)
+        time.sleep(0.03)
         
+    stop_robot()
+    time.sleep(0.2)
+    print(f"[IMU] Successfully Aligned -> Current Yaw: {get_relative_yaw():.2f}°")
     return target_heading
 
 def move_forward_one_cell(target_heading):
     """
-    Feature C: เดินหน้า 1 ช่องตารางโดยวัดระยะจริงจากล้อ (Wheel Odometry) ครบ 0.60m เป๊ะๆ
-    พร้อมระบบ PID Centering และระบบเบรกฉุกเฉิน
+    Feature C: เดินหน้า 1 ช่องตารางโดยวัดระยะจริงจากล้อ (Odometry 0.60m)
+    พร้อมระบบชะลอความเร็วล่วงหน้า (Smooth Deceleration) และหยุดที่ระยะปลอดภัย
     """
     stop_robot()
-    time.sleep(0.5) # พัก 0.5 วินาทีก่อนเริ่มเดินหน้า
+    time.sleep(0.3)
     
     # บันทึกพิกัดล้อเริ่มต้น
     start_x, start_y = pos_x, pos_y
@@ -227,11 +218,12 @@ def move_forward_one_cell(target_heading):
     
     print(f"[MOVE] Forward 1 cell (Odometry target: {CELL_SIZE_M}m)")
     
-    max_timeout = (CELL_SIZE_M / BASE_SPEED) * 1.5 # เผื่อเวลา timeout ป้องกันค้าง
+    max_timeout = (CELL_SIZE_M / BASE_SPEED) * 1.6
     start_time = time.time()
+    brake_counter = 0
+    dist_traveled = 0.0
     
     while time.time() - start_time < max_timeout:
-        # คำนวณระยะทางที่ล้อวิ่งไปจริง (Euclidean Distance จาก Odometry)
         dist_traveled = math.hypot(pos_x - start_x, pos_y - start_y)
         if dist_traveled >= CELL_SIZE_M:
             print(f"[ODOM] Target reached: {dist_traveled:.3f}m")
@@ -240,16 +232,26 @@ def move_forward_one_cell(target_heading):
         s = read_all_sensors()
         dl = s["sharp_left_cm"]
         dr = s["sharp_right_cm"]
+        cur_tof = s["tof_front_mm"]
         
-        # ระบบเบรกฉุกเฉิน: ถ้าจวนตัวจะชนกำแพงด้านหน้า ให้หยุดเดินทันที
-        if s["tof_front_mm"] < 130:
-            print(f"\n[BRAKE] Front wall reached ({s['tof_front_mm']}mm) -> Stopped.")
-            break
+        # 1. ชะลอความเร็วล่วงหน้าเมื่อใกล้กำแพงหน้า (< 350mm)
+        current_speed = BASE_SPEED
+        if cur_tof < 350:
+            current_speed = 0.09 # ลดความเร็วลงครึ่งหนึ่งเพื่อการเทียบระยะที่นุ่มนวล
+            
+        # 2. หยุดระยะปลอดภัยเมื่อถึงกึ่งกลางช่อง (~190-200mm)
+        if cur_tof <= 190 and dist_traveled > 0.15:
+            brake_counter += 1
+            if brake_counter >= 2:
+                print(f"\n[SAFE STOP] Front wall reached perfectly ({cur_tof}mm, Traveled: {dist_traveled:.2f}m) -> Stopped.")
+                break
+        else:
+            brake_counter = 0
             
         strafe_y = 0.0
         turn_z = 0.0
         
-        # 1. Wall Centering PID (ใช้เมื่อมีกำแพงทั้ง 2 ด้าน)
+        # 3. Wall Centering PID (ประคองกึ่งกลางอย่างนุ่มนวล)
         left_ok = dl is not None and 8.0 <= dl < SIDE_WALL_THRES_CM
         right_ok = dr is not None and 8.0 <= dr < SIDE_WALL_THRES_CM
         
@@ -261,29 +263,23 @@ def move_forward_one_cell(target_heading):
                 
         if abs(error) > 2.0:
             strafe_y = KP_CENTER * error
-            strafe_y = max(-0.12, min(0.12, strafe_y))
+            strafe_y = max(-0.08, min(0.08, strafe_y))
             
-        # 2. Emergency Side Scraping Protection (ใช้ค่าจาก IR ซ้าย-ขวา)
-        # ถ้าตัวรถเบี้ยวจนชิดกำแพงระยะประชิด (IR=1) ให้สั่งแถหลบฉุกเฉินทันที
-        if s["ir_45l"] == 1 and s["ir_45r"] != 1:
-            strafe_y = 0.14  # แถหนีไปทางขวา
-        elif s["ir_45r"] == 1 and s["ir_45l"] != 1:
-            strafe_y = -0.14 # แถหนีไปทางซ้าย
-            
-        # 3. Yaw Correction (รักษามุมให้ขนานกับแกนสนาม)
+        # 4. Yaw Correction (รักษามุมให้ขนานกับแกนสนามตลอดเวลา)
         yaw_error = target_rel_yaw - get_relative_yaw()
         if yaw_error > 180: yaw_error -= 360
         elif yaw_error < -180: yaw_error += 360
         
-        if abs(yaw_error) > 1.5:
+        if abs(yaw_error) > 1.2:
             turn_z = KP_YAW * yaw_error * 45.0
-            turn_z = max(-18, min(18, turn_z))
+            turn_z = max(-16, min(16, turn_z))
             
-        ep_chassis.drive_speed(x=BASE_SPEED, y=strafe_y, z=turn_z, timeout=0.1)
+        ep_chassis.drive_speed(x=current_speed, y=strafe_y, z=turn_z, timeout=0.1)
         time.sleep(0.04)
         
     stop_robot()
     time.sleep(0.1)
+    return dist_traveled
 
 # =====================================================================
 # ลอจิก PURE FLOOD FILL ALGORITHM
@@ -425,17 +421,30 @@ def flood_fill_loop(max_steps=200):
             next_heading = get_best_next_move(current_x, current_y, current_heading)
             print(f"Decision -> Current Dist: {distances[current_x][current_y]} | Next Heading: {next_heading}")
             
-            # 5. หมุนตัว (มี Feature A: จัดระยะเทียบกำแพงหน้าอัตโนมัติก่อนเลี้ยว)
+            # 5. หมุนตัว (ล็อกองศาให้ตรงเป๊ะด้วย IMU)
             current_heading = turn_to_heading(current_heading, next_heading)
             
-            # 6. เดินหน้า 1 ช่อง (มี Feature C: วัดระยะจากล้อ Odometry 0.60m)
-            move_forward_one_cell(current_heading)
+            # 5.5 Pre-Move Safety Check: ตรวจสอบกำแพงหน้าทันทีก่อนออกตัวเดิน ห้ามพุ่งชน
+            time.sleep(0.1)
+            s_check = read_all_sensors()
+            if s_check["tof_front_mm"] < FRONT_WALL_THRES_MM:
+                print(f"\n[SAFETY STOP] Front wall detected directly ahead ({s_check['tof_front_mm']}mm) -> Cancelling move!")
+                walls[current_x][current_y][current_heading] = 1
+                time.sleep(0.2)
+                continue # วนกลับไปคำนวณ Flood Fill หาทางใหม่ทันที ไม่เดินชน
             
-            # 7. อัปเดตพิกัดช่องปัจจุบัน
-            if current_heading == 0: current_y += 1
-            elif current_heading == 1: current_x += 1
-            elif current_heading == 2: current_y -= 1
-            elif current_heading == 3: current_x -= 1
+            # 6. เดินหน้า 1 ช่อง (มี Feature C: วัดระยะจากล้อ Odometry 0.60m)
+            traveled = move_forward_one_cell(current_heading)
+            
+            # 7. อัปเดตพิกัดช่องปัจจุบัน (เฉพาะเมื่อวิ่งได้ระยะทางเกิน 40% ของช่องจริง)
+            if traveled >= (CELL_SIZE_M * 0.4):
+                if current_heading == 0: current_y += 1
+                elif current_heading == 1: current_x += 1
+                elif current_heading == 2: current_y -= 1
+                elif current_heading == 3: current_x -= 1
+            else:
+                print(f"[WARN] Move blocked early (traveled only {traveled:.2f}m) -> Marking wall in current cell.")
+                walls[current_x][current_y][current_heading] = 1
             
             # ป้องกันพิกัดหลุดขอบตาราง
             current_x = max(0, min(MAZE_WIDTH - 1, current_x))
