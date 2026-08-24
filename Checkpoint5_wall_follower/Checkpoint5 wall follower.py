@@ -1,12 +1,14 @@
 """
-Classwork 5 - Stable Wall-Follower with Heading Correction
+Checkpoint 4: Robot Controlling (IR+ToF)
 ============================================================
-- Right wall-follower ใช้ IR/Sharp (ระยะ) + TOF (หน้า) ร่วมกัน
-- PID เต็มรูปแบบ (P+I+D) คุม 2 แกนพร้อมกัน:
-    1) ระยะห่างจากกำแพงขวา -> strafe (y)
-    2) heading (yaw จาก IMU) -> rotate (z)
-- หยุดอัตโนมัติเมื่อ TOF หน้า <= 10 cm
-- จับเวลาการเคลื่อนที่ + บันทึกค่า start/stop สำหรับกรอกตารางในรายงาน
+เส้นทาง (ตามไดอะแกรมหน้า 56):
+  1) Start: เช็คสิ่งกีดขวางหน้าหุ่น ห่าง 10 cm (IR)
+  2) เดินหน้า ผ่านทางลาด 2 ช่วง (10+10 cm) - ใช้ IMU pitch ตรวจว่ากำลังขึ้น/ลงลาด
+  3) ถึงพื้นราบ -> เดินขนานกำแพงข้าง รักษาระยะ 10 cm (Sharp/IR analog, ใช้สมการ
+     calibration จาก Checkpoint 3)
+  4) เจอสิ่งกีดขวางหน้าสุดทาง -> หยุดแม่นยำที่ระยะ 5 cm (ToF)
+
+ใช้ค่า calibration (slope, intercept) จาก Checkpoint 3 ของตัวเอง แทนที่ตัวอย่างในสไลด์
 """
 
 import time
@@ -14,27 +16,50 @@ import time
 from robomaster import robot
 
 # =====================================================================
-# CONFIG — ต้อง calibrate ค่าพวกนี้จากการทดสอบจริงในสนามก่อนใช้งานจริง
+# CONFIG — ต้องแก้ค่าจริงจากการทดลองของคุณเองก่อนใช้งาน
 # =====================================================================
-BASE_SPEED       = 0.20     # m/s ความเร็วเดินหน้า
-MAX_STRAFE       = 0.12     # m/s strafe สูงสุด
-MAX_ROTATE       = 25.0     # deg/s rotate สูงสุด (กันหมุนแรงเกินตอนแก้ heading)
 
-STOP_DISTANCE_MM = 100      # หยุดอัตโนมัติเมื่อ TOF หน้า <= 10 cm ตามโจทย์
-DIST_TOLERANCE_CM = 12.0    # เกณฑ์ยอมรับ ±12 cm (ใช้รายงานผล ไม่ใช่ตัวหยุดโปรแกรม)
-YAW_TOLERANCE_DEG = 12.0    # เกณฑ์ยอมรับ ±12°
+# --- สมการ calibration จาก Checkpoint 3: ADC = SLOPE * distance_cm + INTERCEPT ---
+# ตัวอย่างในสไลด์: ADC = 20.362*distance + 12.136 (R^2=0.9984)
+# *** ต้องแทนค่า slope/intercept จากกราฟ ADC-Distance ของ Sharp ตัวคุณเอง ***
+CAL_SLOPE = 20.362
+CAL_INTERCEPT = 12.136
 
-CONTROL_DT       = 0.05     # ความถี่ loop (วินาที)
+def adc_to_cm(adc_value):
+    """แปลงค่า ADC กลับเป็นระยะทาง (cm) จากสมการ calibration เชิงเส้น"""
+    if adc_value is None:
+        return None
+    distance_cm = (adc_value - CAL_INTERCEPT) / CAL_SLOPE
+    return max(distance_cm, 0.0)
 
-# --- PID gains: ระยะห่างจากกำแพง (strafe) ---
-KP_DIST, KI_DIST, KD_DIST = 0.02, 0.001, 0.01   
 
-# --- PID gains: heading correction (rotate) ---
+# --- ความเร็ว ---
+BASE_SPEED      = 0.15     # m/s ความเร็วเดินหน้าปกติ (พื้นราบ)
+RAMP_SPEED      = 0.10     # m/s ความเร็วช้าลงตอนขึ้น/ลงทางลาด (กันหุ่นเสียการทรงตัว)
+MAX_STRAFE      = 0.10     # m/s strafe สูงสุดตอน wall-following
+APPROACH_SPEED  = 0.06     # m/s ความเร็วช้าตอนเข้าใกล้จุดหยุดสุดท้าย (แม่นยำกว่า)
+
+# --- ระยะเป้าหมาย ---
+START_CHECK_CM      = 10.0   # ระยะสิ่งกีดขวางหน้าหุ่นตอน Start (แค่เช็ค ไม่ใช่จุดหยุด)
+WALL_TARGET_CM       = 12.0  # ระยะเป้าหมายขนานกำแพงข้าง (ตอน wall-following)
+WALL_TOLERANCE_CM    = 2.0   # ค่าเผื่อ error ยอมรับได้ตอนคุม strafe
+FINAL_STOP_CM        = 7.0   # ระยะหยุดสุดท้าย (ToF) - จุดสำคัญที่สุดของด่านนี้
+APPROACH_SLOWDOWN_CM = 20.0  # เริ่มชะลอความเร็วเมื่อ ToF เหลือระยะนี้ ก่อนถึงจุดหยุดจริง
+
+# --- IMU / Pitch (ตรวจจับทางลาด) ---
+PITCH_RAMP_THRESHOLD = 5.0   # องศา, pitch เกินนี้ถือว่ากำลังอยู่บนทางลาด
+RAMP_TIMEOUT_SEC      = 15.0 # เวลาสูงสุดที่ยอมให้อยู่บนทางลาด (safety, กันค้าง)
+
+# --- PID เดินขนานกำแพงและหมุน (ใช้ค่าจาก Classwork 5 เป็นฐาน) ---
+KP_WALL, KI_WALL, KD_WALL = 0.02, 0.001, 0.008
 KP_YAW, KI_YAW, KD_YAW = 1.2, 0.02, 0.3
+MAX_ROTATE = 25.0
+
+CONTROL_DT = 0.05
 
 
 # =====================================================================
-# PID controller (generic, ใช้ซ้ำได้ทั้งสองแกน)
+# PID controller
 # =====================================================================
 class PID:
     def __init__(self, kp, ki, kd, output_limit):
@@ -52,35 +77,20 @@ class PID:
     def compute(self, error):
         now = time.time()
         dt = (now - self.prev_time) if self.prev_time is not None else CONTROL_DT
-        dt = max(dt, 1e-3)   # กัน dt=0
+        dt = max(dt, 1e-3)
 
         self.integral += error * dt
-        # anti-windup: จำกัด integral ไม่ให้สะสมจนเกินขอบเขต output
-        max_i = self.output_limit / max(self.ki, 1e-6) if self.ki > 0 else 0
         if self.ki > 0:
+            max_i = self.output_limit / self.ki
             self.integral = max(-max_i, min(max_i, self.integral))
 
         derivative = (error - self.prev_error) / dt
-
         output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
         output = max(-self.output_limit, min(self.output_limit, output))
 
         self.prev_error = error
         self.prev_time = now
         return output
-
-
-# =====================================================================
-# SHARP CALIBRATION — ใช้สมการตัวอย่าง ต้องแทนค่าจริงจากการวัดของคุณ
-# =====================================================================
-def sharp_to_cm(adc_value):
-    if adc_value is None:
-        return None
-    voltage = adc_value * (3.3 / 1023)
-    if voltage <= 0.1:
-        return 999.0
-    distance_cm = 27.86 / (voltage - 0.42)   # TODO: แทนค่าจริงจาก calibration
-    return max(distance_cm, 8.0)
 
 
 # =====================================================================
@@ -91,7 +101,7 @@ print("Connecting via AP Mode...")
 ep_robot.initialize(conn_type="ap")
 
 ep_chassis = ep_robot.chassis
-sensor = ep_robot.sensor              # built-in TOF (หน้า)
+sensor = ep_robot.sensor              # built-in ToF (หน้า)
 sensor_adaptor = ep_robot.sensor_adaptor   # Sharp/IR ภายนอก
 sensor_adaptor.start()
 
@@ -106,12 +116,14 @@ def on_tof_data(sub_info):
 
 sensor.sub_distance(freq=10, callback=on_tof_data)
 
+current_pitch = 0.0
 current_yaw = 0.0
 
 def on_attitude(attitude_info):
-    global current_yaw
+    global current_pitch, current_yaw
     yaw, pitch, roll = attitude_info
     current_yaw = yaw
+    current_pitch = pitch
 
 ep_chassis.sub_attitude(freq=20, callback=on_attitude)
 
@@ -123,24 +135,25 @@ def safe_get_adc(hub_id, port):
         print(f"[WARN] ADC hub={hub_id} port={port} error: {e}")
         return None
 
-
-def read_right_wall_cm():
-    """ระยะห่างจากกำแพงขวา — แก้ hub id/port ให้ตรงกับ Sharp/IR ที่เสียบจริง"""
-    return sharp_to_cm(safe_get_adc(hub_id=1, port=2))
-
-
-def read_ir_slant():
-    """อ่านค่า IR ตรวจจับทางเอียง (ค่า 0 = เจอสิ่งกีดขวาง/ทางเอียง) สมมติใช้พอร์ต 1"""
+def safe_get_io(hub_id, port):
     try:
-        io_val = sensor_adaptor.get_io(id=1, port=1)
-        return io_val == 0
-    except Exception:
-        return False
+        return sensor_adaptor.get_io(id=hub_id, port=port)
+    except Exception as e:
+        print(f"[WARN] IO hub={hub_id} port={port} error: {e}")
+        return None
+
+
+def read_side_wall_cm():
+    """ระยะห่างจากกำแพงข้าง (Sharp) — แก้ hub id/port ให้ตรงกับที่เสียบจริง"""
+    return adc_to_cm(safe_get_adc(hub_id=1, port=1))
+
+def read_front_ir_cm():
+    """ระยะห่างจากสิ่งกีดขวางหน้า (Sharp/IR แยกจาก ToF) — ใช้เช็คตอน Start"""
+    return adc_to_cm(safe_get_adc(hub_id=2, port=1))
 
 
 def stop_robot():
     ep_chassis.drive_speed(x=0, y=0, z=0, timeout=0.1)
-
 
 def wrap_angle(angle_deg):
     """ทำให้มุมอยู่ในช่วง [-180, 180] กัน error ตอน yaw ข้ามจาก 179 -> -179"""
@@ -152,146 +165,177 @@ def wrap_angle(angle_deg):
 
 
 # =====================================================================
-# วิ่ง 1 รอบการทดลอง — คืนค่า dict สำหรับกรอกตารางในรายงาน
+# STEP 1: Start — เช็คว่าสิ่งกีดขวางหน้าหุ่นอยู่ที่ระยะ 10 cm ตามที่กำหนด
 # =====================================================================
-def run_trial(trial_no, max_duration=60.0):
-    dist_pid = PID(KP_DIST, KI_DIST, KD_DIST, MAX_STRAFE)
-    yaw_pid = PID(KP_YAW, KI_YAW, KD_YAW, MAX_ROTATE)
-
-    # --- Calibrate ค่าเริ่มต้น (เฉลี่ยหลายครั้งกันสัญญาณรบกวน) ---
-    print(f"\n=== Trial {trial_no}: Calibrating start position... ===")
-    samples_dist, samples_yaw = [], []
+def step1_start_check():
+    print("\n=== STEP 1: START CHECK ===")
+    samples = []
     for _ in range(10):
-        d = read_right_wall_cm()
-        if d is not None and d < 999:
-            samples_dist.append(d)
-        samples_yaw.append(current_yaw)
+        d = read_front_ir_cm()
+        if d is not None:
+            samples.append(d)
         time.sleep(0.05)
 
-    if not samples_dist:
-        print("[ERROR] อ่านค่ากำแพงขวาไม่ได้เลย เช็ค hub id/port ก่อนเริ่ม")
-        return None
+    if not samples:
+        print("[WARN] อ่านค่า IR หน้าไม่ได้ ข้ามการเช็คนี้ไป")
+        return
 
-    target_dist_cm = sum(samples_dist) / len(samples_dist)
-    target_yaw_deg = sum(samples_yaw) / len(samples_yaw)
-    start_dist_cm = target_dist_cm
-    start_yaw_deg = target_yaw_deg
+    avg_dist = sum(samples) / len(samples)
+    print(f"ระยะสิ่งกีดขวางหน้าหุ่นที่วัดได้: {avg_dist:.1f} cm (คาดหวัง ~{START_CHECK_CM} cm)")
+    if abs(avg_dist - START_CHECK_CM) > 3.0:
+        print(f"[WARN] ระยะเริ่มต้นห่างจากที่คาดไว้เกิน 3cm ตรวจสอบตำแหน่งเริ่มต้นของหุ่นอีกครั้ง")
+    else:
+        print("[OK] ตำแหน่งเริ่มต้นถูกต้อง")
 
-    print(f"[START] wall_dist={start_dist_cm:.1f} cm | yaw={start_yaw_deg:.1f} deg")
-    print(f"[GO] Base speed={BASE_SPEED} m/s | Stop when front <= {STOP_DISTANCE_MM} mm")
 
+# =====================================================================
+# STEP 2: เดินหน้าผ่านทางลาด — ใช้ IMU pitch ตรวจจับว่ากำลังอยู่บนทางลาดหรือไม่
+# แล้วชะลอความเร็วเพื่อความเสถียร จนกลับมาที่พื้นราบ (pitch ~ 0)
+# =====================================================================
+def step2_cross_ramp():
+    print("\n=== STEP 2: CROSSING RAMP ===")
     start_time = time.time()
-    stop_dist_cm = None
-    stop_yaw_deg = None
+    on_ramp_ever = False
 
-    try:
-        while True:
-            elapsed = time.time() - start_time
-            if elapsed > max_duration:
-                print("\n[TIMEOUT] เกินเวลาสูงสุดที่กำหนด หยุดฉุกเฉิน")
-                break
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed > RAMP_TIMEOUT_SEC:
+            print("\n[TIMEOUT] ข้ามทางลาดนานเกินกำหนด หยุดฉุกเฉิน")
+            break
 
-            # --- อ่านค่า sensor ---
-            wall_dist = read_right_wall_cm()
-            yaw_now = current_yaw
-            is_slant = read_ir_slant()
-
-            if is_slant:
-                # ถ้าเจอทางเอียง ให้หันหน้าออก (เลี้ยวซ้าย)
-                strafe_y = 0.0
-                z_correct = MAX_ROTATE  # เลี้ยวซ้ายด้วยความเร็วหมุนบวก
-                target_yaw_deg = yaw_now  # อัปเดตเป้าหมายองศาใหม่ตามปัจจุบันเรื่อยๆ ไม่ให้สะบัดกลับตอนพ้นทางเอียง
-                print(f"\rt={elapsed:5.1f}s  [SLANT DETECTED! Turning Left...]                                     ", end="")
+        # เช็ค IR ว่าเจอสิ่งกีดขวาง/กำแพงเอียงหรือไม่ (เหมือนใน Step 3)
+        ir_val = safe_get_io(hub_id=1, port=3)
+        if ir_val == 1:
+            ep_chassis.drive_speed(x=0.0, y=0.0, z=MAX_ROTATE, timeout=CONTROL_DT)
+            print("\r[IR=1] Turning away to avoid crash! (Step 2)             ", end="")
+        else:
+            is_on_ramp = abs(current_pitch) > PITCH_RAMP_THRESHOLD
+            if is_on_ramp:
+                on_ramp_ever = True
+                speed = RAMP_SPEED
             else:
-                # --- PID ระยะห่างจากกำแพง (strafe) ---
-                strafe_y = 0.0
-                if wall_dist is not None and wall_dist < 999:
-                    dist_error = wall_dist - target_dist_cm   # + = ไกลผนังขวาไป (ต้องแถไปทางขวา)
-                    strafe_y = dist_pid.compute(dist_error)
+                speed = BASE_SPEED
 
-                # --- PID heading (rotate) ---
-                yaw_error = wrap_angle(target_yaw_deg - yaw_now)  # เอาค่าเป้าหมายตั้ง ลบด้วยค่าปัจจุบัน
-                z_correct = yaw_pid.compute(yaw_error)
+            ep_chassis.drive_speed(x=speed, y=0, z=0, timeout=CONTROL_DT)
 
-                # --- แสดงผล real-time ---
-                dist_ok = "OK" if wall_dist is not None and abs(wall_dist - target_dist_cm) <= DIST_TOLERANCE_CM else "!!"
-                yaw_ok = "OK" if abs(yaw_error) <= YAW_TOLERANCE_DEG else "!!"
-                wd_str = f"{wall_dist:.1f}" if wall_dist is not None else "N/A"
-                print(
-                    f"\rt={elapsed:5.1f}s  ToF:{tof_front_mm:4}mm  "
-                    f"WallDist:{wd_str}cm[{dist_ok}]  YawErr:{yaw_error:5.1f}deg[{yaw_ok}]  "
-                    f"strafe:{strafe_y:+.3f}  z:{z_correct:+.2f}",
-                    end=""
-                )
+            print(
+                f"\rpitch:{current_pitch:5.1f}deg  "
+                f"{'[ON RAMP]' if is_on_ramp else '[FLAT]   '}  "
+                f"speed:{speed:.2f}m/s  t={elapsed:.1f}s    ",
+                end=""
+            )
+
+        # เงื่อนไขจบ step: เคยขึ้นทางลาดมาแล้ว (on_ramp_ever) และตอนนี้กลับมาราบแล้ว
+        # ให้เดินต่ออีกนิดหน่อยเพื่อให้พ้นฐานทางลาดจริง ๆ ก่อนเข้าสู่ wall-following
+        if on_ramp_ever and not is_on_ramp and elapsed > 1.0:
+            print("\n[OK] ผ่านทางลาดแล้ว กลับสู่พื้นราบ")
+            stop_robot()
+            time.sleep(0.3)
+            break
+
+        time.sleep(CONTROL_DT)
+
+
+# =====================================================================
+# STEP 3: เดินขนานกำแพงข้าง รักษาระยะ 12 cm ด้วย PID (Sharp)
+# เดินไปเรื่อย ๆ จนกว่า ToF หน้าจะเริ่มตรวจพบสิ่งกีดขวาง (เข้าสู่ STEP 4)
+# =====================================================================
+def step3_wall_parallel():
+    print("\n=== STEP 3: WALL-PARALLEL WALKING (target=12cm) ===")
+    wall_pid = PID(KP_WALL, KI_WALL, KD_WALL, MAX_STRAFE)
+    yaw_pid = PID(KP_YAW, KI_YAW, KD_YAW, MAX_ROTATE)
+    target_yaw = current_yaw  # ล็อคเป้าหมายการหันหน้าไว้ที่ตอนเริ่มเข้าสู่ Step 3
+
+    while True:
+        # เช็ค IR (ค่า 1 = เจอสิ่งกีดขวาง ให้หันหน้าออก)
+        ir_val = safe_get_io(hub_id=1, port=3)
+        
+        if ir_val == 1:
+            # หันหน้าออกเพื่อไม่ให้ชน (หมุนซ้าย)
+            ep_chassis.drive_speed(x=0.0, y=0.0, z=MAX_ROTATE, timeout=CONTROL_DT)
+            target_yaw = current_yaw  # อัปเดตเป้าหมายใหม่เรื่อยๆ เพื่อไม่ให้สะบัดกลับตอนหลุด
+            print("\r[IR=1] Turning away to avoid crash!                      ", end="")
+        else:
+            wall_dist = read_side_wall_cm()
+            strafe_y = 0.0
+            if wall_dist is not None:
+                error = wall_dist - WALL_TARGET_CM
+                strafe_y = wall_pid.compute(error)
+
+            # คุมหน้าให้ตรงเสมอ (Heading PID)
+            yaw_error = wrap_angle(target_yaw - current_yaw)
+            z_correct = yaw_pid.compute(yaw_error)
 
             ep_chassis.drive_speed(x=BASE_SPEED, y=strafe_y, z=z_correct, timeout=CONTROL_DT)
 
-            # --- เงื่อนไขหยุดอัตโนมัติ: TOF หน้า <= 10 cm ---
-            if tof_front_mm <= STOP_DISTANCE_MM:
-                stop_robot()
-                stop_dist_cm = wall_dist
-                stop_yaw_deg = yaw_now
-                elapsed_time = time.time() - start_time
-                print(f"\n[STOP] Front wall reached ({tof_front_mm} mm <= {STOP_DISTANCE_MM} mm)")
-                break
+            wd_str = f"{wall_dist:.1f}" if wall_dist is not None else "N/A"
+            status = "OK" if (wall_dist is not None and abs(wall_dist - WALL_TARGET_CM) <= WALL_TOLERANCE_CM) else "!!"
+            print(
+                f"\rWallDist:{wd_str}cm[{status}]  strafe:{strafe_y:+.3f}  z:{z_correct:+.2f}  "
+                f"ToF_front:{tof_front_mm}mm      ",
+                end=""
+            )
 
-            time.sleep(CONTROL_DT)
+        # เริ่มเจอสิ่งกีดขวางหน้าสุดทาง -> ออกจาก wall-following ไปเข้า step หยุดแม่นยำ
+        if tof_front_mm <= APPROACH_SLOWDOWN_CM * 10:  # cm -> mm
+            print(f"\n[OK] เริ่มตรวจพบสิ่งกีดขวางหน้าสุดทาง (ToF={tof_front_mm}mm) เข้าสู่โหมดหยุดแม่นยำ")
+            break
+
+        time.sleep(CONTROL_DT)
+
+
+# =====================================================================
+# STEP 4: หยุดแม่นยำที่ระยะ 7 cm จากสิ่งกีดขวางหน้าสุดทาง (ToF)
+# ชะลอความเร็วลงเรื่อย ๆ เมื่อใกล้ถึงเป้าหมาย เพื่อไม่ให้เลยจุดหยุด
+# =====================================================================
+def step4_precise_stop():
+    print("\n=== STEP 4: PRECISE STOP AT 7cm ===")
+    target_mm = FINAL_STOP_CM * 10
+
+    while True:
+        current_mm = tof_front_mm
+        remaining_mm = current_mm - target_mm
+
+        if remaining_mm <= 0:
+            stop_robot()
+            print(f"\n[STOP] ถึงจุดหยุดแล้ว! ToF={current_mm}mm (target={target_mm}mm)")
+            break
+
+        # ยิ่งใกล้เป้าหมาย ยิ่งลดความเร็วลง (proportional to remaining distance)
+        speed_ratio = min(1.0, remaining_mm / (APPROACH_SLOWDOWN_CM * 10))
+        speed = max(0.02, APPROACH_SPEED * speed_ratio)
+
+        ep_chassis.drive_speed(x=speed, y=0, z=0, timeout=CONTROL_DT)
+        print(f"\rToF:{current_mm}mm  remaining:{remaining_mm}mm  speed:{speed:.3f}m/s", end="")
+
+        time.sleep(CONTROL_DT)
+
+    # ยืนยันระยะสุดท้ายหลังหยุดสนิท
+    time.sleep(0.3)
+    final_error_cm = (tof_front_mm - target_mm) / 10.0
+    print(f"[RESULT] ระยะสุดท้าย: {tof_front_mm/10:.1f} cm | Error จากเป้าหมาย 7cm: {final_error_cm:+.1f} cm")
+
+
+# =====================================================================
+# MAIN — รันครบทุก step ตามลำดับในไดอะแกรม
+# =====================================================================
+if __name__ == "__main__":
+    try:
+        step1_start_check()
+        input("\n>>> กด Enter เพื่อเริ่มเดินหน้า...")
+
+        step2_cross_ramp()
+        step3_wall_parallel()
+        step4_precise_stop()
+
+        print("\n\n=== CHECKPOINT 4 COMPLETE ===")
 
     except KeyboardInterrupt:
         stop_robot()
         print("\n[INTERRUPTED] หยุดโดยผู้ใช้")
-        return None
-
-    stop_robot()
-
-    result = {
-        "trial": trial_no,
-        "start_dist_cm": round(start_dist_cm, 1),
-        "stop_dist_cm": round(stop_dist_cm, 1) if stop_dist_cm else None,
-        "dist_error": round((stop_dist_cm - start_dist_cm), 1) if stop_dist_cm else None,
-        "start_yaw_deg": round(start_yaw_deg, 1),
-        "stop_yaw_deg": round(stop_yaw_deg, 1) if stop_yaw_deg is not None else None,
-        "yaw_error": round(wrap_angle(stop_yaw_deg - start_yaw_deg), 1) if stop_yaw_deg is not None else None,
-        "stop_distance_cm": round(tof_front_mm / 10.0, 1),
-        "elapsed_time_sec": round(elapsed_time, 2),
-    }
-    return result
-
-
-def print_summary_table(results):
-    print("\n" + "=" * 100)
-    print("สรุปผลการทดลอง (คัดลอกไปกรอกในตารางรายงานได้เลย)")
-    print("=" * 100)
-    header = f"{'รอบ':<5}{'DistStart':<12}{'DistStop':<12}{'DistErr':<10}{'YawStart':<11}{'YawStop':<11}{'YawErr':<9}{'StopDist':<11}{'Time(s)':<9}"
-    print(header)
-    print("-" * 100)
-    for r in results:
-        if r is None:
-            continue
-        print(
-            f"{r['trial']:<5}{r['start_dist_cm']:<12}{r['stop_dist_cm']:<12}{r['dist_error']:<10}"
-            f"{r['start_yaw_deg']:<11}{r['stop_yaw_deg']:<11}{r['yaw_error']:<9}"
-            f"{r['stop_distance_cm']:<11}{r['elapsed_time_sec']:<9}"
-        )
-
-
-# =====================================================================
-# MAIN — รันหลายรอบตามตารางในรายงาน (ค่า default = 3 รอบ)
-# =====================================================================
-if __name__ == "__main__":
-    NUM_TRIALS = 3
-    all_results = []
-
-    try:
-        for i in range(1, NUM_TRIALS + 1):
-            input(f"\n>>> วางหุ่นที่จุด START แล้วกด Enter เพื่อเริ่ม Trial {i}...")
-            result = run_trial(i)
-            all_results.append(result)
-            time.sleep(1)
-
-        print_summary_table(all_results)
 
     finally:
+        stop_robot()
         try:
             sensor.unsub_distance()
         except Exception:
@@ -305,4 +349,4 @@ if __name__ == "__main__":
         except Exception:
             pass
         ep_robot.close()
-        print("\nConnection closed.")
+        print("Connection closed.")
