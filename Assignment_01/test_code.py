@@ -35,6 +35,9 @@
    ดู protocol.py:1954 เทียบกับ sensor.py:75) สลับไปมาได้โดยค่าไม่เพี้ยน
 4. ``sensor_adaptor.start()`` เป็น no-op (module.py ``Module.start`` = pass)
 5. ``robot.initialize()`` เรียก ``set_robot_mode(FREE)`` ให้อยู่แล้ว
+6. ``robotic_arm.moveto()`` เป็นพิกัด "สัมบูรณ์" (robotic_arm.py:123 ส่ง mode=1)
+   ไม่ใช่ระยะเลื่อนจากท่าปัจจุบัน ต้องเรียก ``recenter()`` พาแขนกลับจุดอ้างอิง
+   ก่อนใช้งานครั้งแรก ไม่งั้นตำแหน่งที่สั่งจะเพี้ยนตามท่าที่แขนค้างอยู่ตอนบูต
 """
 
 import argparse
@@ -134,6 +137,12 @@ DO_PAYLOAD = True               # ปิดชั่วคราวได้ต�
 ARM_CARRY_XY = (100, 50)        # ตำแหน่งแขนตอนวิ่ง (mm) ต้องไม่บัง ToF
 ARM_PLACE_XY = (180, -40)       # ตำแหน่งแขนตอนวางของ (mm)
 GRIPPER_POWER = 50
+GRIPPER_TUCK_POWER = 30         # แรงหุบเบา ๆ ตอนมือเปล่า กันนิ้วเกี่ยวกำแพง
+PAYLOAD_LOAD_S = 2.0            # เวลากางกริปเปอร์ค้างไว้ให้วางวัตถุก่อนหุบคีบ
+GRIPPER_ACT_S = 1.5             # เวลารอให้นิ้วขยับจนสุด (ไม่มี action ให้รอ)
+GRIPPER_STATUS_FREQ = 5         # Hz ของ sub_status สถานะเปลี่ยนช้า ไม่ต้องถี่
+GRIPPER_STATUS_STALE_S = 1.5    # เกินนี้ถือว่าสถานะค้างเก่า เอามาตัดสินไม่ได้
+ARM_TIMEOUT_S = 6               # timeout ของ action แขนกล (วินาที)
 
 # ---------- ระบบ ----------
 CONTROL_DT = 0.04               # คาบของ control loop
@@ -305,7 +314,10 @@ class SensorSnapshot(object):
 
 
 class SensorHub(object):
-    """เจ้าของ subscription ทั้งหมด และเป็นทางเดียวที่โค้ดส่วนอื่นอ่านเซนเซอร์
+    """เจ้าของ subscription ของเซนเซอร์นำทาง และเป็นทางเดียวที่ส่วนอื่นอ่านค่า
+
+    สถานะกริปเปอร์ไม่ได้อยู่ที่นี่ ``Payload`` ถือ ``gripper.sub_status`` ของ
+    ตัวเองไว้ เพราะไม่เกี่ยวกับการนำทางและต้องไม่ถูกสมัครตอน ``--no-payload``
 
     callback ของ DDS ทำงานคนละเธรดกับ control loop ทุกฟิลด์จึงถูกเขียนและอ่าน
     ภายใต้ล็อกเดียวกัน
@@ -1108,6 +1120,17 @@ class Payload(object):
     ``gripper.open()`` / ``close()`` ไม่คืน action ให้ ``wait_for_completed``
     (ดู gripper.py:65) จึงต้องหน่วงเวลาเอาเอง ต่างจากแขนกลที่คืน action มา
 
+    ``arm.moveto()`` ใช้พิกัดสัมบูรณ์ ``pick_up()`` จึง ``recenter()`` แขนก่อน
+    เสมอ เพื่อให้ ARM_CARRY_XY / ARM_PLACE_XY ตรงกันทุกครั้งที่รัน
+
+    คำสั่งแขนและกริปเปอร์ทุกคำสั่งถูกห่อ try/except ไว้ ถ้าฮาร์ดแวร์ไม่ตอบจะ
+    พิมพ์เตือนแล้วไปต่อ ไม่ลาก search run ทั้งรอบล้มไปด้วย
+
+    คลาสนี้ถือ subscription ของตัวเอง (``gripper.sub_status``) ไม่ได้ฝากไว้กับ
+    SensorHub เพราะสถานะกริปเปอร์ไม่เกี่ยวกับการนำทาง และต้องไม่ถูกสมัครเลยตอน
+    สั่ง ``--no-payload`` ผู้เรียกต้องเรียก ``start()`` ก่อนใช้ และ ``stop()``
+    ตอนจบงาน
+
     Args:
         arm: ออบเจกต์ robotic_arm ของหุ่น
         gripper: ออบเจกต์ gripper ของหุ่น
@@ -1117,27 +1140,199 @@ class Payload(object):
         self.arm = arm
         self.gripper = gripper
 
-    def pick_up(self):
-        """หุบกริปเปอร์คีบวัตถุ แล้วเก็บแขนเข้าท่าวิ่ง"""
-        print("[ARM] หุบกริปเปอร์คีบวัตถุ")
-        self.gripper.close(power=GRIPPER_POWER)
-        time.sleep(1.5)
-        print("[ARM] เก็บแขนเข้าท่าวิ่งที่ {0}".format(ARM_CARRY_XY))
-        self.arm.moveto(x=ARM_CARRY_XY[0], y=ARM_CARRY_XY[1]).wait_for_completed(timeout=6)
+        self._lock = threading.Lock()
+        self._status = ""
+        self._status_t = 0.0
+        self._subscribed = False
+        #: bool: True เมื่อเชื่อว่าคีบวัตถุอยู่ ใช้ตัดสินว่าต้องปล่อยตอนจบไหม
+        self.holding = False
+
+    # ---------- callback (ทำงานบนเธรดของ DDS) ----------
+    def _on_status(self, status):
+        # dds.py:132 ส่งค่าที่ data_info() คืนมาให้ตรง ๆ ของกริปเปอร์เป็นสตริง
+        # เดี่ยว "opened" / "closed" / "normal" (gripper.py:36) ไม่ใช่ tuple
+        now = time.time()
+        with self._lock:
+            self._status = status
+            self._status_t = now
+
+    def start(self):
+        """สมัครรับสถานะกริปเปอร์ ถ้าสมัครไม่ได้ก็ยังทำงานต่อได้แบบไม่ยืนยัน"""
+        try:
+            self.gripper.sub_status(freq=GRIPPER_STATUS_FREQ,
+                                    callback=self._on_status)
+            self._subscribed = True
+        except Exception as exc:                        # noqa: BLE001
+            print("[WARN] สมัคร gripper.sub_status ไม่สำเร็จ: {0}".format(exc))
+            print("[WARN] จะข้ามการยืนยันว่าคีบวัตถุติดจริง")
+
+    def stop(self):
+        """ยกเลิก subscription ของกริปเปอร์ (เรียกซ้ำได้ ไม่ throw)"""
+        if not self._subscribed:
+            return
+        try:
+            self.gripper.unsub_status()
+        except Exception as exc:                        # noqa: BLE001
+            print("[WARN] unsub gripper status ล้มเหลว: {0}".format(exc))
+        self._subscribed = False
+
+    def status(self):
+        """สถานะกริปเปอร์ล่าสุด
+
+        Returns:
+            str: "opened" / "closed" / "normal" หรือ "" เมื่อยังไม่มีข้อมูล
+                หรือข้อมูลค้างเก่าเกิน GRIPPER_STATUS_STALE_S
+        """
+        with self._lock:
+            if self._status_t == 0.0:
+                return ""
+            if time.time() - self._status_t > GRIPPER_STATUS_STALE_S:
+                return ""
+            return self._status
+
+    # ---------- คำสั่งฮาร์ดแวร์ (กลืน exception ไม่ให้ล้มทั้งรอบ) ----------
+    def _arm_recenter(self):
+        """พาแขนกลับจุดอ้างอิงก่อนใช้พิกัดสัมบูรณ์ (robotic_arm.py:105)"""
+        print("[ARM] พาแขนกลับจุดอ้างอิง")
+        try:
+            self.arm.recenter().wait_for_completed(timeout=ARM_TIMEOUT_S)
+        except Exception as exc:                        # noqa: BLE001
+            print("[WARN] พาแขนกลับจุดอ้างอิงไม่สำเร็จ: {0}".format(exc))
+            print("[WARN] ตำแหน่งแขนที่สั่งต่อจากนี้อาจเพี้ยน")
+            return False
         time.sleep(0.3)
+        return True
+
+    def _arm_moveto(self, xy, label):
+        """ขยับแขนไปพิกัดสัมบูรณ์ xy
+
+        Args:
+            xy: tuple (x, y) หน่วย mm
+            label: ชื่อท่าที่เอาไว้พิมพ์ log
+
+        Returns:
+            bool: True เมื่อขยับจนจบ action
+        """
+        print("[ARM] ขยับแขนไป{0} {1}".format(label, xy))
+        try:
+            action = self.arm.moveto(x=xy[0], y=xy[1])
+            action.wait_for_completed(timeout=ARM_TIMEOUT_S)
+        except Exception as exc:                        # noqa: BLE001
+            print("[WARN] ขยับแขนไป{0} ไม่สำเร็จ: {1}".format(label, exc))
+            return False
+        time.sleep(0.3)
+        return True
+
+    def _grip(self, fn, label, power, wait_s):
+        """สั่งกริปเปอร์แล้วหน่วงเวลารอให้นิ้วขยับจนสุด
+
+        Args:
+            fn: ``self.gripper.open`` หรือ ``self.gripper.close``
+            label: คำกริยาที่เอาไว้พิมพ์ log
+            power: แรงบีบ 1-100
+            wait_s: เวลาที่หน่วงรอหลังส่งคำสั่ง
+
+        Returns:
+            bool: True เมื่อส่งคำสั่งออกไปได้
+        """
+        try:
+            fn(power=power)
+        except Exception as exc:                        # noqa: BLE001
+            print("[WARN] สั่งกริปเปอร์{0}ไม่สำเร็จ: {1}".format(label, exc))
+            return False
+        time.sleep(wait_s)
+        return True
+
+    # ---------- ลำดับงาน ----------
+    def _confirm_grip(self):
+        """ตรวจจากสถานะว่าหุบแล้วคีบวัตถุติดจริงไหม
+
+        gripper.py:36 นิยามไว้ว่า closed = นิ้วหุบจนสุด ซึ่งแปลว่าไม่มีอะไรขวาง
+        อยู่ระหว่างนิ้ว ส่วน normal = หุบค้างกลางทาง = มีวัตถุคาอยู่
+
+        Returns:
+            bool: True เมื่อเชื่อว่าคีบติด
+        """
+        status = self.status()
+        if status == "":
+            print("[WARN] ไม่มีสถานะกริปเปอร์ให้ตรวจ ถือว่าคีบติดไว้ก่อน")
+            return True
+        if status == "normal":
+            print("[ARM] ยืนยันคีบวัตถุติด (นิ้วหุบค้างกลางทาง)")
+            return True
+        if status == "closed":
+            print("[WARN] นิ้วหุบจนสุด = ไม่มีวัตถุคาอยู่ระหว่างนิ้ว")
+        else:
+            print("[WARN] นิ้วยังกางอยู่ คำสั่งหุบไม่มีผล")
+        return False
+
+    def _release(self, reason):
+        """กางกริปเปอร์ปล่อยวัตถุ แล้วยืนยันจากสถานะว่าไม่ได้คีบค้างอยู่
+
+        Args:
+            reason: ข้อความบอกเหตุผลที่ปล่อย เอาไว้พิมพ์ log
+
+        Returns:
+            bool: True เมื่อเชื่อว่าปล่อยออกไปแล้ว
+        """
+        print("[ARM] กางกริปเปอร์{0}".format(reason))
+        self._grip(self.gripper.open, "กาง", GRIPPER_POWER, GRIPPER_ACT_S)
+        status = self.status()
+        if status == "closed" or status == "normal":
+            print("[WARN] สั่งกางแล้วแต่สถานะยังเป็น {0} วัตถุอาจค้างอยู่"
+                  .format(status))
+            return False
+        # "" = ไม่มีข้อมูลให้ตรวจ ถือว่าปล่อยแล้วเพื่อไม่ให้วนสั่งกางซ้ำตอนจบงาน
+        self.holding = False
+        return True
+
+    def pick_up(self):
+        """พาแขนเข้าจุดอ้างอิง กางกริปเปอร์รับวัตถุ แล้วหุบคีบเก็บเข้าท่าวิ่ง
+
+        Returns:
+            bool: True เมื่อเชื่อว่าคีบวัตถุติดจริง
+        """
+        # moveto() เป็นพิกัดสัมบูรณ์ ถ้าไม่พาแขนกลับจุดอ้างอิงก่อน ท่า CARRY และ
+        # PLACE จะเพี้ยนไปตามตำแหน่งที่แขนค้างอยู่ตอนเปิดเครื่อง
+        self._arm_recenter()
+
+        # กางกริปเปอร์ก่อนเสมอ ถ้าตอนบูตนิ้วหุบอยู่แล้ว close() ข้างล่างจะไม่มี
+        # ผลอะไรเลย หุ่นจะวิ่งออกไปทั้งที่ไม่ได้คีบอะไรมา
+        print("[ARM] กางกริปเปอร์ รอวางวัตถุ {0:.1f} วินาที"
+              .format(PAYLOAD_LOAD_S))
+        self._grip(self.gripper.open, "กาง", GRIPPER_POWER,
+                   GRIPPER_ACT_S + PAYLOAD_LOAD_S)
+
+        print("[ARM] หุบกริปเปอร์คีบวัตถุ")
+        self._grip(self.gripper.close, "หุบ", GRIPPER_POWER, GRIPPER_ACT_S)
+        self.holding = self._confirm_grip()
+
+        self._arm_moveto(ARM_CARRY_XY, "ท่าวิ่ง")
+        return self.holding
 
     def place(self):
-        """ยื่นแขนออกไปวางวัตถุ แล้วเก็บแขนกลับ"""
-        print("[ARM] ยื่นแขนไปที่ {0} เพื่อวางวัตถุ".format(ARM_PLACE_XY))
-        self.arm.moveto(x=ARM_PLACE_XY[0], y=ARM_PLACE_XY[1]).wait_for_completed(timeout=6)
-        time.sleep(0.5)
-        self.gripper.open(power=GRIPPER_POWER)
-        time.sleep(1.5)
-        print("[ARM] เก็บแขนกลับท่าวิ่ง")
-        self.arm.moveto(x=ARM_CARRY_XY[0], y=ARM_CARRY_XY[1]).wait_for_completed(timeout=6)
+        """ยื่นแขนออกไปวางวัตถุ แล้วเก็บแขนกลับ
+
+        Returns:
+            bool: True เมื่อเชื่อว่าวางวัตถุลงแล้ว
+        """
+        self._arm_moveto(ARM_PLACE_XY, "จุดวางของ")
+        time.sleep(0.5)             # รอให้แขนนิ่งก่อนปล่อย กันวัตถุกระเด็น
+        released = self._release("วางวัตถุ")
+
+        self._arm_moveto(ARM_CARRY_XY, "ท่าวิ่ง")
         # หุบกริปเปอร์เบา ๆ ไว้ กันนิ้วกางไปเกี่ยวกำแพงตอนถอยออก
-        self.gripper.close(power=30)
-        time.sleep(1.0)
+        self._grip(self.gripper.close, "หุบ", GRIPPER_TUCK_POWER, 1.0)
+        return released
+
+    def release_if_holding(self):
+        """ปล่อยวัตถุที่ยังคีบค้างอยู่ ใช้ตอนจบงานแบบไม่สำเร็จ
+
+        ถ้าปล่อยให้หุบคาวัตถุไว้ มอเตอร์จะออกแรงบีบค้างจนกว่าจะปิดเครื่อง
+        """
+        if not self.holding:
+            return
+        self._release("ปล่อยวัตถุก่อนจบงาน")
 
 
 # =====================================================================
@@ -1160,8 +1355,9 @@ def run_search(hub, driver, payload):
                   DIR_NAMES[START_HEADING], GOAL_CELLS))
     print("=" * 62)
 
-    if payload is not None:
-        payload.pick_up()
+    if payload is not None and not payload.pick_up():
+        # เดินสำรวจต่อได้อยู่ แค่ไม่มีของไปวางที่เป้าหมาย ให้คนคุมเห็นชัด ๆ
+        print("[WARN] ไม่ได้คีบวัตถุมาด้วย จะเดินสำรวจต่อแต่ไม่มีของไปวาง")
 
     # นับความล้มเหลวซ้ำที่ (ช่อง, ทิศ) เดิม ใช้ตัดวงจรกรณีเดินไม่ผ่านแต่ ToF
     # ก็ไม่เห็นกำแพง (ล้อลื่น ติดขอบ ฯลฯ) ซึ่งถ้าไม่ตัดจะเลือกทิศเดิมซ้ำไปเรื่อย ๆ
@@ -1632,6 +1828,7 @@ def main():
     ep_robot.initialize(conn_type=args.conn)
 
     hub = SensorHub(ep_robot)
+    payload = None
     success = False
     try:
         hub.start()
@@ -1648,9 +1845,9 @@ def main():
             driver.calibrate_yaw_sign()
             driver.set_north_reference(START_HEADING)
 
-            payload = None
             if DO_PAYLOAD and not args.no_payload:
                 payload = Payload(ep_robot.robotic_arm, ep_robot.gripper)
+                payload.start()
             else:
                 print("[INFO] ข้ามการคีบและวางวัตถุ")
 
@@ -1662,6 +1859,11 @@ def main():
             ep_robot.chassis.drive_speed(x=0, y=0, z=0)
         except Exception as exc:                        # noqa: BLE001
             print("[WARN] สั่งหยุดล้อไม่สำเร็จ: {0}".format(exc))
+        if payload is not None:
+            # จบแบบไม่ถึงเป้าหมาย (error / Ctrl-C) place() ไม่ได้ถูกเรียก วัตถุ
+            # จะค้างอยู่ในกริปเปอร์และมอเตอร์บีบค้างไว้ ต้องปล่อยเองตรงนี้
+            payload.release_if_holding()
+            payload.stop()
         hub.stop()
         try:
             ep_robot.close()
