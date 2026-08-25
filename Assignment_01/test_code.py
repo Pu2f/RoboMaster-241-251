@@ -64,8 +64,8 @@ MAZE_W = 4                      # จำนวนช่องแกน X (ทิ
 MAZE_H = 4                      # จำนวนช่องแกน Y (ทิศเหนือเป็นบวก)
 CELL_SIZE_M = 0.60              # ความกว้าง 1 ช่อง หน่วยเมตร
 START_CELL = (0, 0)
-START_HEADING = 0               # 0=North 1=East 2=South 3=West
-GOAL_CELLS = [(2, 3)]           # รองรับหลายช่อง เช่นโซนกลาง 2x2 ของ micromouse
+START_HEADING = 0                # 0=North 1=East 2=South 3=West
+GOAL_CELLS = [(3, 3)]           # รองรับหลายช่อง เช่นโซนกลาง 2x2 ของ micromouse
 
 # ---------- การต่อสายเซนเซอร์ ----------
 TOF_INDEX = 0                   # sub_distance คืน list 4 ตัว ใช้ตัวไหนเป็นด้านหน้า
@@ -78,12 +78,12 @@ IR_RIGHT_45 = (3, 1)            # (hub_id, port) อ่านด้วย IO (di
 # ตราบใดที่ยังเป็น None โปรแกรมจะปฏิเสธที่จะวิ่งในสนามจริง
 # เหตุผล: threshold ที่ผิดทำให้หุ่น "วิ่งดูปกติทุกอย่างแต่สร้างแผนที่ผิด"
 # ซึ่งแยกไม่ออกจากบั๊กของ odometry หรือของ flood fill ตอนอยู่หน้าสนาม
-SHARP_LEFT_WALL_ADC = (374, 352)      # (enter, exit) ทำ hysteresis กันค่ากระพริบ
-SHARP_RIGHT_WALL_ADC = (374, 351)     # (enter, exit)
-SHARP_LEFT_REF = 350           # ค่า ADC ซ้าย ตอนหุ่นอยู่กลางช่องพอดี
-SHARP_RIGHT_REF = 350          # ค่า ADC ขวา ตอนหุ่นอยู่กลางช่องพอดี
+SHARP_LEFT_WALL_ADC = (211, 189)      # (enter, exit) ทำ hysteresis กันค่ากระพริบ
+SHARP_RIGHT_WALL_ADC = (297, 278)    # (enter, exit)
+SHARP_LEFT_REF = 350     # ค่า ADC ซ้าย ตอนหุ่นอยู่กลางช่องพอดี
+SHARP_RIGHT_REF = 386          # ค่า ADC ขวา ตอนหุ่นอยู่กลางช่องพอดี
 IR_TRIGGERED_VALUE = 0       # ค่า IO ตอนมีสิ่งกีดขวาง (0 หรือ 1)
-FRONT_STOP_MM = 116            # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
+FRONT_STOP_MM = 75            # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
 
 FRONT_WALL_MM_OVERRIDE = None   # ปกติปล่อย None ให้คำนวณจากเรขาคณิตของช่อง
 
@@ -181,13 +181,23 @@ def front_wall_threshold_mm():
     return FRONT_STOP_MM + int(CELL_SIZE_M * 1000.0 / 2.0)
 
 
-def sharp_polarity():
+def sharp_polarity(thresholds):
     """+1 ถ้า ADC สูง = อยู่ใกล้, -1 ถ้า ADC ต่ำ = อยู่ใกล้
 
     อนุมานจากลำดับของ (enter, exit) ที่ ``--calib`` คำนวณมาให้ จึงไม่ต้องมี
     ค่าคอนฟิกแยกอีกตัว และไม่ต้องสมมติว่าเซนเซอร์ตอบสนองไปทางไหน
+
+    รับ threshold ของข้างที่ถามมาโดยตรง ไม่ใช่อ่านจากข้างซ้ายข้างเดียวแล้วเหมาว่า
+    ขวาเหมือนกัน เพราะ Sharp สองตัวอาจเป็นคนละรุ่นหรือต่อสลับขั้วกัน ซึ่งจะทำให้
+    การประคองกลางช่องดันผิดทางแบบเงียบ ๆ โดยไม่มีอะไรเตือน
+
+    Args:
+        thresholds (tuple): (enter, exit) ของข้างนั้น
+
+    Returns:
+        int: +1 หรือ -1
     """
-    enter, exit_ = SHARP_LEFT_WALL_ADC
+    enter, exit_ = thresholds
     return 1 if enter > exit_ else -1
 
 
@@ -323,8 +333,12 @@ class SensorHub(object):
 
         #: bool: True = ใช้ sub_adapter (push), False = fallback ไป get_adc (blocking)
         self.use_adapter = True
+        #: bool: True เมื่อสมัคร sub_adapter ไปแล้วจริง ใช้ตัดสินตอน stop
+        self._adapter_subscribed = False
         self._poll_cache = (None, None)
         self._poll_t = 0.0
+        #: float: เวลาล่าสุดที่ fallback อ่าน Sharp ได้ครบสองข้าง 0 = ยังไม่เคยได้เลย
+        self._poll_ok_t = 0.0
         self._started = False
 
     # ---------- callback (ทำงานบนเธรดของ DDS) ----------
@@ -383,7 +397,9 @@ class SensorHub(object):
         self._started = True
         self._check_wiring()
         self._sensor.sub_distance(freq=DDS_FREQ, callback=self._on_tof)
-        self._adaptor.sub_adapter(freq=DDS_FREQ, callback=self._on_adapter)
+        if self.use_adapter:
+            self._adaptor.sub_adapter(freq=DDS_FREQ, callback=self._on_adapter)
+            self._adapter_subscribed = True
         self._chassis.sub_attitude(freq=DDS_FREQ, callback=self._on_attitude)
         self._chassis.sub_position(freq=DDS_FREQ, callback=self._on_position)
 
@@ -423,14 +439,19 @@ class SensorHub(object):
         """ปิด subscription ทั้งหมด (เรียกซ้ำได้ ไม่ throw)"""
         if not self._started:
             return
-        for name, fn in (("distance", self._sensor.unsub_distance),
-                         ("adapter", self._adaptor.unsub_adapter),
-                         ("attitude", self._chassis.unsub_attitude),
-                         ("position", self._chassis.unsub_position)):
+        targets = [("distance", self._sensor.unsub_distance),
+                   ("attitude", self._chassis.unsub_attitude),
+                   ("position", self._chassis.unsub_position)]
+        # ดูจากธง subscribe ไม่ใช่จาก use_adapter เพราะ use_adapter อาจถูกปิดทีหลัง
+        # ตอนที่สมัครไปแล้วแต่ไม่มีข้อมูลส่งมา ซึ่งกรณีนั้นยังต้องปลดออกอยู่ดี
+        if self._adapter_subscribed:
+            targets.insert(1, ("adapter", self._adaptor.unsub_adapter))
+        for name, fn in targets:
             try:
                 fn()
             except Exception as exc:                    # noqa: BLE001
                 print("[WARN] unsub {0} ล้มเหลว: {1}".format(name, exc))
+        self._adapter_subscribed = False
         self._started = False
 
     # ---------- การอ่าน ----------
@@ -461,6 +482,11 @@ class SensorHub(object):
                 io[key] = None
         self._poll_cache = (adc, io)
         self._poll_t = now
+        # นับว่าสดเฉพาะรอบที่อ่าน Sharp ได้ครบสองข้าง เพราะการตัดสินกำแพงข้างพึ่งพา
+        # สองค่านี้ ถ้า get_adc พังจนคืน None ตลอด snapshot ต้องมองเห็นว่า adapter
+        # ค้าง ไม่ใช่ปล่อยให้ fresh เป็น True แล้วหุ่นวิ่งต่อโดยมองไม่เห็นกำแพงข้าง
+        if adc["l"] is not None and adc["r"] is not None:
+            self._poll_ok_t = now
         return self._poll_cache
 
     def snapshot(self):
@@ -479,7 +505,7 @@ class SensorHub(object):
                 adapter_age = now - self._adapter_t if self._adapter_t else 1e9
             else:
                 ad = io = None
-                adapter_age = 0.0
+                adapter_age = None      # โหมด fallback คำนวณหลังอ่านค่าเสร็จ
 
         if ad is not None:
             adc_left = ad[self._adapter_index(*SHARP_LEFT)]
@@ -490,6 +516,7 @@ class SensorHub(object):
             adc, io_map = self._poll_adaptor(now)
             adc_left, adc_right = adc["l"], adc["r"]
             ir_left, ir_right = io_map["l"], io_map["r"]
+            adapter_age = now - self._poll_ok_t if self._poll_ok_t else 1e9
 
         # ToF: ค่า 0 หรือค่าเกินพิสัย แปลว่าไม่มีเป้าหมายอยู่ในระยะ ไม่ใช่สตรีมพัง
         # กรณีสตรีมพังจริงจะถูกจับด้วย tof_age ด้านล่างแทน
@@ -915,26 +942,35 @@ class Driver(object):
         "จุดที่ซ้ายกับขวาสมดุลกัน" ซึ่งอยู่ที่เดิมเสมอไม่ว่าเส้นโค้งของเซนเซอร์
         จะเป็นรูปอะไร การแปลงเป็นระยะทางก่อนจึงไม่ได้เพิ่มความแม่นยำ มีแต่จะ
         เพิ่มโอกาสผิดจากสมการ calibration ที่อาจไม่ตรงกับเซนเซอร์ตัวจริง
+
+        แต่ละข้างถูกคูณ polarity ของตัวเองก่อน จนกลายเป็นค่า "ชิดกว่าจุดอ้างอิง
+        เท่าไร" ที่บวกเสมอเมื่อเข้าใกล้กำแพงข้างนั้น หลังจากนั้นสองข้างอยู่ในหน่วย
+        เดียวกันแล้วจึงเอามาลบกันได้ตรง ๆ แม้ Sharp สองตัวจะตอบสนองคนละทาง
         """
-        polarity = sharp_polarity()
         left = wall_from_adc(snap.adc_left, SHARP_LEFT_WALL_ADC)
         right = wall_from_adc(snap.adc_right, SHARP_RIGHT_WALL_ADC)
+        near_left = near_right = None
+        if left:
+            near_left = (sharp_polarity(SHARP_LEFT_WALL_ADC)
+                         * (snap.adc_left - SHARP_LEFT_REF))
+        if right:
+            near_right = (sharp_polarity(SHARP_RIGHT_WALL_ADC)
+                          * (snap.adc_right - SHARP_RIGHT_REF))
 
-        if left and right:
-            # มีกำแพงสองข้าง: คุมให้ผลต่างซ้าย-ขวาเท่ากับตอนอยู่กลางช่องพอดี
-            balance = SHARP_LEFT_REF - SHARP_RIGHT_REF
-            error = (snap.adc_left - snap.adc_right) - balance
-        elif left:
+        if near_left is not None and near_right is not None:
+            # มีกำแพงสองข้าง: คุมให้ความชิดซ้ายกับความชิดขวาเท่ากัน
+            error = near_left - near_right
+        elif near_left is not None:
             # มีกำแพงข้างเดียว: คุมให้ระยะถึงกำแพงนั้นเท่ากับค่าอ้างอิง
-            error = snap.adc_left - SHARP_LEFT_REF
-        elif right:
-            error = SHARP_RIGHT_REF - snap.adc_right
+            error = near_left
+        elif near_right is not None:
+            error = -near_right
         else:
             return 0.0
 
         if abs(error) < CENTER_DEADBAND_ADC:
             return 0.0
-        return clamp(polarity * KP_CENTER * error, -MAX_STRAFE, MAX_STRAFE)
+        return clamp(KP_CENTER * error, -MAX_STRAFE, MAX_STRAFE)
 
     def advance_one_cell(self, heading):
         """เดินหน้าหนึ่งช่องตาราง
@@ -1367,6 +1403,21 @@ def run_calibration(hub):
                 "ควรขยับตำแหน่งหรือมุมติดตั้งเซนเซอร์ก่อนแล้วคาลิเบรตใหม่"
                 .format(side, separation))
 
+    if "SHARP_LEFT" in results and "SHARP_RIGHT" in results:
+        pol = {}
+        for ref_name in ("SHARP_LEFT", "SHARP_RIGHT"):
+            enter, exit_ = results[ref_name][:2]
+            pol[ref_name] = "สูงขึ้น" if enter > exit_ else "ต่ำลง"
+        same = pol["SHARP_LEFT"] == pol["SHARP_RIGHT"]
+        print("  ทิศทางตอบสนอง: เข้าใกล้กำแพงแล้วซ้ายค่า{0} ขวาค่า{1} -> {2}"
+              .format(pol["SHARP_LEFT"], pol["SHARP_RIGHT"],
+                      "เหมือนกัน" if same else "กลับด้านกัน"))
+        if not same:
+            problems.append(
+                "Sharp ซ้ายกับขวาตอบสนองกลับด้านกัน ตัวประคองกลางช่องรองรับได้ "
+                "(แยก polarity รายข้างแล้ว) แต่ปกติแปลว่าใช้คนละรุ่นหรือต่อสลับขั้ว "
+                "ควรยืนยันก่อนว่าตั้งใจให้เป็นแบบนี้")
+
     close_mean, _ = _stats(very_close["adc_l"])
     wall_l_mean, _ = _stats(walls["adc_l"])
     if close_mean is not None and wall_l_mean is not None and "SHARP_LEFT" in results:
@@ -1446,8 +1497,22 @@ def run_calibration(hub):
 # โหมด --sim : ทดสอบตรรกะ Flood Fill โดยไม่ต้องต่อหุ่น
 # =====================================================================
 #: list: คู่ช่องที่มีกำแพงกั้นระหว่างกันในเขาวงกตจำลอง
-#: ออกแบบไว้ให้เส้นทางที่สั้นที่สุดมองไม่เห็นตั้งแต่ต้น หุ่นต้องเดินเข้าทางตัน
-#: ที่ (3,1) ก่อนแล้วถอยกลับมาหาทางใหม่ จึงได้ทดสอบทั้งการวางแผนและการย้อนกลับ
+#:
+#: หุ่นเดินถึงเป้าหมายใน 5 ก้าวตามเส้นทาง (0,0) -> (0,1) -> (1,1) -> (2,1) ->
+#: (2,2) -> (2,3) ซึ่งเป็นเส้นทางที่สั้นที่สุดจริงของเขาวงกตนี้ ไม่มีการย้อนกลับ
+#:
+#: สิ่งที่ทดสอบได้จริง
+#:   * การวางแผนใหม่เมื่อความรู้เปลี่ยน - ก้าวที่ 1 ที่ (0,1) ทางตรงที่ Flood Fill
+#:     เดาไว้ว่าโล่งกลับมีกำแพง distance ของทิศตรงจึงพุ่งขึ้น ต้องเลี้ยวขวาแทน
+#:   * การยอมหมุนเมื่อคุ้ม - ก้าวที่ 3 ที่ (2,1) ทางตรงไปต่อได้ แต่ทางซ้ายมี
+#:     distance ต่ำกว่าอย่างเคร่งครัด ตัวเลือกจึงต้องข้ามความชอบเดินตรงไป
+#:   * การอ่านกำแพงครบทั้งสามด้านของ observe() - กำแพง 5 ใน 6 เส้นถูกพบจริง
+#:     โดยกระจายกันทั้งด้านหน้า ซ้าย และขวา จบด้วยสำรวจไป 29/40 ด้าน
+#:
+#: สิ่งที่ยังไม่ถูกทดสอบ
+#:   เส้นทางนี้ไม่มีทางตันเลย ตรรกะการถอยออกจากทางตันและ recovery ทั้งหมดใน
+#:   run_search จึงไม่ถูกแตะ ส่วนกำแพง (3,1)-(3,2) อยู่นอกเส้นทาง หุ่นไม่เคย
+#:   เดินไปเห็น เปลี่ยนหรือลบทิ้งได้โดยผลการรันไม่เปลี่ยน
 SIM_BLOCKED_EDGES = [
     ((0, 0), (1, 0)),
     ((0, 1), (0, 2)),
