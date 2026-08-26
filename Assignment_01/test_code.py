@@ -84,7 +84,10 @@ MAZE_H = 6                      # จำนวนช่องแกน Y (ทิ
 CELL_SIZE_M = 0.60              # ความกว้าง 1 ช่อง หน่วยเมตร
 START_CELL = (0, 0)
 START_HEADING = 0                # 0=North 1=East 2=South 3=West
-GOAL_CELLS = [(3, 4)]           # รองรับหลายช่อง เช่นโซนกลาง 2x2 ของ micromouse
+# ช่องที่หุ่น "ไปยืน" ตอนจบ ไม่ใช่ช่องที่ของไปอยู่ สองอย่างนี้เป็นคนละช่องกัน
+# เมื่อจุดวางไม่ได้อยู่กลางช่อง เพราะแขนยื่นตรงไปข้างหน้าอย่างเดียว หุ่นจึงต้อง
+# ยืนถอยออกมาหนึ่งช่องแล้วเอื้อมเข้าไปวาง (ดู AIM_SEQUENCE)
+GOAL_CELLS = [(4, 4)]           # รองรับหลายช่อง เช่นโซนกลาง 2x2 ของ micromouse
 
 # ---------- การต่อสายเซนเซอร์ ----------
 TOF_INDEX = 0                   # sub_distance คืน list 4 ตัว ใช้ตัวไหนเป็นด้านหน้า
@@ -97,12 +100,12 @@ IR_RIGHT_45 = (3, 1)            # (hub_id, port) อ่านด้วย IO (di
 # ตราบใดที่ยังเป็น None โปรแกรมจะปฏิเสธที่จะวิ่งในสนามจริง
 # เหตุผล: threshold ที่ผิดทำให้หุ่น "วิ่งดูปกติทุกอย่างแต่สร้างแผนที่ผิด"
 # ซึ่งแยกไม่ออกจากบั๊กของ odometry หรือของ flood fill ตอนอยู่หน้าสนาม
-SHARP_LEFT_WALL_ADC = (387, 351)      # (enter, exit) ทำ hysteresis กันค่ากระพริบ
-SHARP_RIGHT_WALL_ADC = (381, 371)    # (enter, exit)
-SHARP_LEFT_REF = 374     # ค่า ADC ซ้าย ตอนหุ่นอยู่กลางช่องพอดี
-SHARP_RIGHT_REF = 376          # ค่า ADC ขวา ตอนหุ่นอยู่กลางช่องพอดี
+SHARP_LEFT_WALL_ADC = (455, 339)      # (enter, exit) ทำ hysteresis กันค่ากระพริบ
+SHARP_RIGHT_WALL_ADC = (404, 394)    # (enter, exit)
+SHARP_LEFT_REF = 397     # ค่า ADC ซ้าย ตอนหุ่นอยู่กลางช่องพอดี
+SHARP_RIGHT_REF = 412          # ค่า ADC ขวา ตอนหุ่นอยู่กลางช่องพอดี
 IR_TRIGGERED_VALUE = 0       # ค่า IO ตอนมีสิ่งกีดขวาง (0 หรือ 1)
-FRONT_STOP_MM = 70            # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
+FRONT_STOP_MM = 95           # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
 
 FRONT_WALL_MM_OVERRIDE = None   # ปกติปล่อย None ให้คำนวณจากเรขาคณิตของช่อง
 
@@ -120,7 +123,7 @@ IR_SLANT_BIAS_DEG = 4.0         # องศาที่เอียงเป้�
 GUARD_STRAFE = 0.05             # m/s เบี่ยงหนีเมื่อ IR guard ติดข้างเดียว
 
 # ---------- ความเร็ว ----------
-BASE_SPEED = 0.18               # m/s เดินหน้าปกติ
+BASE_SPEED = 0.25               # m/s เดินหน้าปกติ
 SLOW_SPEED = 0.09               # m/s ตอนเข้าใกล้กำแพงหน้า
 GUARD_SPEED = 0.07              # m/s ตอน IR guard ติด
 BACKUP_SPEED = 0.12             # m/s ตอนถอยกลับเข้าช่องเดิม
@@ -180,6 +183,37 @@ ARM_DROP_XY = (110, 0)
 #    ถ้าเป้าหมายคือช่องเริ่มต้นที่ไม่ได้เดินมา จะไม่ถอยเลย
 GOAL_WALL_CLEARANCE_MM = 400
 
+# ---------- การเล็งเป้าก่อนวางของ ----------
+# ใช้เมื่อจุดวางถูกกำหนดเป็น "ระยะจากกำแพง" ไม่ใช่ "กลางช่อง" ซึ่งกลไกเดินทีละ
+# ช่องเล็งให้ไม่ได้ ตั้งเป็น [] = ไม่เล็ง ถอยตาม GOAL_WALL_CLEARANCE_MM แล้ววาง
+# จากตรงที่จอด (พฤติกรรมก่อนมีฟีเจอร์นี้) ถ้าตั้ง AIM_SEQUENCE ไว้ ค่า
+# GOAL_WALL_CLEARANCE_MM จะถูกข้ามไปเอง เพราะการเล็งคุมระยะได้ละเอียดกว่า
+#
+# แต่ละขั้นคือ (ทิศที่ต้องหันก่อนวัด, ระยะ ToF ที่ต้องการ หน่วย mm)
+#   ทิศ None = ใช้ทิศที่มาถึงเลย ไม่ต้องหัน
+#   ทิศของขั้นสุดท้ายคือทิศที่ยื่นแขนวาง เพราะแขนยื่นตรงไปข้างหน้าอย่างเดียว
+#   ห้ามใส่ทิศที่ ToF มองไม่เห็นกำแพง (เช่นด้านที่เป็นประตูเข้าห้อง)
+#
+# วิธีหาตัวเลขสองตัวนี้: อย่าคำนวณ เพราะระหว่าง "ToF อ่านได้เท่าไร" กับ "ของไป
+# ตกตรงไหน" มีค่าคงที่ที่ไม่มีในโค้ดหลายตัว (ToF ล้ำหน้าจุดหมุนเท่าไร ฐานแขน
+# อยู่ตรงไหน จุดหมุนเลื่อนตอนหมุนตัวเท่าไร) ให้รันหนึ่งรอบด้วยค่าเริ่มต้นนี้
+# แล้ววัดด้วยตลับเมตรว่าของไปตกห่างกำแพงเท่าไรจริง จากนั้นชดเชยครั้งเดียวจบ
+# เพราะสองแกนแยกกันสนิทและเป็นเชิงเส้น 1:1
+#
+#   ขั้นที่วัดกำแพง "ตรงข้าม" กับด้านที่นับระยะเป้า:  ค่าใหม่ = เดิม - (เป้า - วัดได้)
+#   ขั้นที่วัดกำแพง "เดียวกัน" กับด้านที่นับระยะเป้า:  ค่าใหม่ = เดิม + (เป้า - วัดได้)
+#
+# เงื่อนไขเดียวคือลำดับต้องเหมือนเดิมทุกครั้ง เพราะค่าคงที่ทั้งหมดถูกกลืนไว้ในลำดับ
+#
+# ค่าด้านล่างคือของสนามที่ห้องเป้าหมายเป็น 2x2 ช่อง หุ่นเข้าห้องได้ทางเดียวคือ
+# ตกลงมาจากทางเหนือเข้าช่อง (4,4) หันใต้ แล้วเป้าอยู่ห่างกำแพงเหนือกับกำแพง
+# ตะวันตกของห้องด้านละ 400 mm
+AIM_SEQUENCE = [
+    (2, 560),       # หันใต้ วัดกำแพงล่างของห้อง (กำแพงเหนือเป็นประตู มองไม่เห็น)
+    (3, 460),       # หันตะวันตก วัดกำแพงตะวันตก แล้ววางจากทิศนี้
+]
+AIM_MAX_MOVE_M = 0.35           # ขยับได้ไกลสุดต่อหนึ่งขั้น กันความเสียหายเมื่อ ToF เพี้ยน
+
 GRIPPER_POWER = 50
 GRIPPER_TUCK_POWER = 30         # แรงหุบเบา ๆ ตอนมือเปล่า กันนิ้วเกี่ยวกำแพง
 PAYLOAD_LOAD_S = 2.0            # เวลากางกริปเปอร์ค้างไว้ให้วางวัตถุก่อนหุบคีบ
@@ -188,6 +222,9 @@ GRIPPER_RELEASE_TRIES = 3       # สั่งกางซ้ำได้กี�
 GRIPPER_STATUS_FREQ = 5         # Hz ของ sub_status สถานะเปลี่ยนช้า ไม่ต้องถี่
 GRIPPER_STATUS_STALE_S = 1.5    # เกินนี้ถือว่าสถานะค้างเก่า เอามาตัดสินไม่ได้
 ARM_TIMEOUT_S = 6               # timeout ของ action แขนกล (วินาที)
+ARM_SETTLE_S = 0.3              # รอให้แขนหยุดสั่นหลังจบ action ก่อนสั่งท่าต่อไป
+PLACE_SETTLE_S = 0.5            # รอให้แขนนิ่งที่ท่าวางก่อนกางนิ้ว กันวัตถุล้ม
+GRIPPER_TUCK_S = 1.0            # รอให้นิ้วหุบเก็บจนสุดตอนมือเปล่า
 
 # ---------- payload: หยิบที่ไหน และหยิบยังไง ----------
 # สองค่านี้ไม่เกี่ยวกัน ผสมกันได้อิสระ ปิดการคีบทั้งหมดด้วย --no-payload
@@ -1151,16 +1188,144 @@ class Driver(object):
                       "สำเร็จ" if ok else "ไม่สำเร็จ"))
         return ok, traveled, reason
 
-    def back_off_from_wall(self, clearance_mm, heading, limit_m):
-        """ถอยหลังจนกำแพงหน้าห่างอย่างน้อย clearance_mm เพื่อเปิดที่ให้แขนยื่น
+    def _travel(self, speed, heading, budget_m, stop=None, center=True):
+        """ลูปเคลื่อนที่ตามแนวที่หันอยู่ ใช้ร่วมกันทุกการเดินที่ไม่ใช่เต็มช่อง
 
-        แบ่งหน้าที่เซนเซอร์ตามสิ่งที่มันบอกได้จริง ToF คืนมิลลิเมตรจึงเป็นตัว
-        ตัดสินว่าถอยพอหรือยัง ส่วน Sharp สองข้างคืนแค่ ADC ดิบ แปลงเป็นระยะ
-        ไม่ได้ จึงใช้ทางเดียวที่มันเชื่อถือได้คือประคองให้อยู่กลางช่องระหว่าง
-        ถอย ไม่ให้ไปเบียดกำแพงข้างระหว่างทาง
+        รวมสิ่งที่ทุกการเดินต้องทำเหมือนกันไว้ที่เดียว คือประคอง yaw ให้ตรงทิศ
+        ประคองตัวให้อยู่กลางช่องด้วย Sharp นับระยะที่ขยับจริงจาก odometry และ
+        หยุดเมื่อเซนเซอร์ขาดการอัปเดต ส่วนที่ต่างกันของแต่ละงานอยู่ที่ ``stop``
+        กับทิศของ ``speed`` เท่านั้น
 
         Args:
-            clearance_mm: ระยะจาก ToF ถึงกำแพงหน้าที่ต้องการ
+            speed (float): m/s บวก = เดินหน้า ลบ = ถอย
+            heading (int): ทิศที่ต้องประคอง yaw ไว้
+            budget_m (float): ระยะทางสูงสุดที่ยอมให้ขยับ
+            stop: ฟังก์ชันรับ snapshot คืน True เมื่อถึงเงื่อนไขที่ต้องการ
+                None = เดินจนครบ budget_m
+            center (bool): True = ให้ Sharp ประคองกลางช่องระหว่างทาง
+
+        Returns:
+            tuple: (moved_m, reason) โดย reason เป็น "stop" / "budget" /
+                "sensor_stale:<ชื่อสตรีม>" / "timeout"
+        """
+        start = self.hub.snapshot()
+        start_x, start_y = start.pos_x, start.pos_y
+        target_yaw = self.heading_yaw(heading)
+        deadline = (time.time()
+                    + (budget_m / abs(speed)) * MOVE_TIMEOUT_RATIO + 1.0)
+        reason = "timeout"
+
+        while time.time() < deadline:
+            snap = self.hub.snapshot()
+            if not snap.fresh:
+                reason = "sensor_stale:" + snap.stale_reason
+                break
+            if stop is not None and stop(snap):
+                reason = "stop"
+                break
+            if math.hypot(snap.pos_x - start_x,
+                          snap.pos_y - start_y) >= budget_m:
+                reason = "budget"
+                break
+
+            yaw_error = wrap_deg(target_yaw - snap.yaw)
+            turn = 0.0
+            if abs(yaw_error) > YAW_HOLD_DEADBAND_DEG:
+                turn = clamp(KP_YAW_HOLD * yaw_error,
+                             -MAX_YAW_CORRECT_DPS, MAX_YAW_CORRECT_DPS)
+            strafe = self._centering_strafe(snap) if center else 0.0
+            self._drive(x=speed, y=strafe, z=self.yaw_sign * turn)
+            time.sleep(CONTROL_DT)
+
+        self.stop()
+        time.sleep(0.15)
+        snap = self.hub.snapshot()
+        moved = math.hypot(snap.pos_x - start_x, snap.pos_y - start_y)
+        return moved, reason
+
+    def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None):
+        """เดินหน้าหรือถอยจนกำแพงที่หันหน้าใส่ห่างเท่ากับ target_mm
+
+        นี่คือความสามารถพื้นฐานที่ทำให้หุ่นจอดที่ตำแหน่งย่อยในช่องได้ ไม่ใช่แค่
+        กลางช่อง งานอย่างการวางของให้ตรงเป้าที่กำหนดเป็นระยะจากกำแพง จึงทำได้
+        ด้วยการเรียกเมธอดนี้ทีละแกน โดยหันหน้าเข้าหากำแพงของแกนนั้น
+
+        เหตุที่วัดได้แค่กำแพงด้านหน้า: ToF เป็นเซนเซอร์ตัวเดียวในหุ่นที่คืนค่า
+        เป็นมิลลิเมตรจริง และมันยิงไปข้างหน้าอย่างเดียว Sharp ข้างคืนแค่ ADC ดิบ
+        ที่บอกได้ว่ามีกำแพงไหมกับชิดกว่าหรือห่างกว่ากลางช่อง แปลงเป็นระยะไม่ได้
+        จึงได้แค่ประคองไม่ให้เบียดกำแพงข้างระหว่างขยับ
+
+        การขยับตามแนวที่หันอยู่ไม่กระทบตำแหน่งตามแกนตั้งฉาก การจัดทีละแกนจึง
+        ไม่รบกวนกัน ตราบใดที่ไม่ใช้ strafe มาขยับเอง
+
+        Args:
+            target_mm: ระยะที่ต้องการให้ ToF อ่านได้เมื่อจบ
+            heading: ทิศที่หุ่นหันอยู่ ใช้ประคอง yaw
+            budget_m: ขยับได้ไกลสุดกี่เมตร กันความเสียหายเมื่อ ToF อ่านเพี้ยน
+            floor_mm: ห้ามเข้าใกล้กำแพงกว่านี้ None = ใช้ FRONT_STOP_MM
+
+        Returns:
+            tuple: (tof_mm หลังจัด, moved_m, reason)
+        """
+        floor = FRONT_STOP_MM if floor_mm is None else floor_mm
+        snap = self.hub.snapshot()
+        if snap.tof_mm is None:
+            print("[ALIGN] ToF ไม่เห็นกำแพงในระยะวัด จัดระยะไม่ได้")
+            return None, 0.0, "no_wall"
+
+        error_mm = snap.tof_mm - target_mm
+        if abs(error_mm) <= ALIGN_TOLERANCE_MM:
+            print("[ALIGN] ToF = {0}mm ตรงเป้า {1}mm อยู่แล้ว"
+                  .format(snap.tof_mm, target_mm))
+            return snap.tof_mm, 0.0, "already_there"
+        if budget_m <= 0.0:
+            print("[ALIGN] ToF = {0}mm ห่างเป้า {1}mm แต่ขยับไม่ได้ (งบ 0)"
+                  .format(snap.tof_mm, target_mm))
+            return snap.tof_mm, 0.0, "no_room"
+
+        # ToF มากกว่าเป้า = อยู่ไกลกำแพงเกินไป ต้องเดินหน้าเข้าหา และกลับกัน
+        forward = error_mm > 0
+        if forward and target_mm < floor:
+            print("[ALIGN] เป้า {0}mm ใกล้กว่าระยะต่ำสุด {1}mm ไม่เดินเข้าไป"
+                  .format(target_mm, floor))
+            return snap.tof_mm, 0.0, "below_floor"
+
+        # ขยับเกินระยะที่ผิดอยู่ไม่มีประโยชน์ เอาค่าที่น้อยกว่าเป็นงบระยะทาง
+        budget = min(abs(error_mm) / 1000.0, budget_m)
+        print("[ALIGN] ToF = {0}mm เป้า {1}mm -> {2} ไม่เกิน {3:.3f} m "
+              "(งบ {4:.3f} m)"
+              .format(snap.tof_mm, target_mm, "เดินหน้า" if forward else "ถอย",
+                      budget, budget_m))
+
+        if forward:
+            def reached(s):
+                return s.tof_mm is None or s.tof_mm <= max(target_mm, floor)
+        else:
+            def reached(s):
+                return s.tof_mm is None or s.tof_mm >= target_mm
+
+        speed = ALIGN_SPEED if forward else -ALIGN_SPEED
+        moved, reason = self._travel(speed, heading, budget, stop=reached)
+
+        snap = self.hub.snapshot()
+        got = ("ไกลเกินระยะวัด" if snap.tof_mm is None
+               else "{0}mm".format(snap.tof_mm))
+        print("[ALIGN] ขยับ {0:.3f} m แล้ว ToF = {1} (เป้า {2}mm) เหตุที่จบ: {3}"
+              .format(moved, got, target_mm, "ถึงเป้า" if reason == "stop"
+                      else reason))
+        if reason == "budget":
+            print("[WARN] ใช้งบระยะทางหมดก่อนถึงเป้า ตำแหน่งยังไม่ตรงที่ตั้งไว้")
+        return snap.tof_mm, moved, reason
+
+    def back_off_from_wall(self, clearance_mm, heading, limit_m):
+        """ถอยจนกำแพงหน้าห่าง "อย่างน้อย" clearance_mm เพื่อเปิดที่ให้แขนยื่น
+
+        ต่างจาก ``align_to_wall`` ตรงที่นี่เป็นเกณฑ์ขั้นต่ำ ไม่ใช่ค่าเป้า ห่าง
+        เกินไม่ใช่ปัญหาจึงไม่ดึงหุ่นกลับเข้าหากำแพง หน้าที่ของมันคือกันแขนชน
+        กำแพงตอนวางของ ไม่ใช่การเล็งตำแหน่ง
+
+        Args:
+            clearance_mm: ระยะขั้นต่ำจาก ToF ถึงกำแพงหน้า
             heading: ทิศที่หุ่นหันอยู่ ใช้ประคอง yaw ระหว่างถอย
             limit_m: ถอยได้ไกลสุดกี่เมตร 0 = ห้ามถอย
 
@@ -1187,38 +1352,17 @@ class Driver(object):
               "{2:.3f} m (เพดาน {3:.3f} m)"
               .format(snap.tof_mm, clearance_mm, budget_m, limit_m))
 
-        start_x, start_y = snap.pos_x, snap.pos_y
-        target_yaw = self.heading_yaw(heading)
-        deadline = time.time() + (budget_m / BACKUP_SPEED) * MOVE_TIMEOUT_RATIO + 1.0
-        reason = "timeout"
-
-        while time.time() < deadline:
-            snap = self.hub.snapshot()
-            if not snap.fresh:
-                reason = "sensor_stale:" + snap.stale_reason
-                break
-            if snap.tof_mm is None or snap.tof_mm >= clearance_mm:
-                reason = "clear"
-                break
-            if math.hypot(snap.pos_x - start_x, snap.pos_y - start_y) >= budget_m:
-                reason = "limit"
-                break
-
-            yaw_error = wrap_deg(target_yaw - snap.yaw)
-            turn = 0.0
-            if abs(yaw_error) > YAW_HOLD_DEADBAND_DEG:
-                turn = clamp(KP_YAW_HOLD * yaw_error,
-                             -MAX_YAW_CORRECT_DPS, MAX_YAW_CORRECT_DPS)
-            self._drive(x=-BACKUP_SPEED, y=self._centering_strafe(snap),
-                        z=self.yaw_sign * turn)
-            time.sleep(CONTROL_DT)
-
-        self.stop()
-        time.sleep(0.15)
+        moved, reason = self._travel(
+            -ALIGN_SPEED, heading, budget_m,
+            stop=lambda s: s.tof_mm is None or s.tof_mm >= clearance_mm)
+        if reason == "stop":
+            reason = "clear"
+        elif reason == "budget":
+            reason = "limit"
 
         snap = self.hub.snapshot()
-        moved = math.hypot(snap.pos_x - start_x, snap.pos_y - start_y)
-        got = "ไกลเกินระยะวัด" if snap.tof_mm is None else "{0}mm".format(snap.tof_mm)
+        got = ("ไกลเกินระยะวัด" if snap.tof_mm is None
+               else "{0}mm".format(snap.tof_mm))
         print("[BACKOFF] ถอยไป {0:.3f} m กำแพงหน้าห่าง {1} (ต้องการ {2}mm) "
               "เหตุที่จบ: {3}".format(moved, got, clearance_mm, reason))
         if reason == "limit":
@@ -1232,31 +1376,15 @@ class Driver(object):
 
         ถ้าไม่ถอย หุ่นจะค้างอยู่กลางทางในตำแหน่งที่ระบบไม่รู้ว่าอยู่ตรงไหน
         แล้วการเดินครั้งถัดไปจะวัดระยะจากจุดที่ผิดตั้งแต่ต้น
+
+        ไม่ให้ Sharp ประคองกลางช่องระหว่างถอย เพราะกรณีที่เรียกเมธอดนี้คือหุ่น
+        เพิ่งเดินไม่ผ่าน อาจติดขัดหรือเบียดอะไรอยู่ การเพิ่มการเลื่อนข้างเข้าไป
+        ตอนนั้นมีแต่จะทำให้เดาไม่ออกว่าหุ่นไปจบตรงไหน
         """
         if distance_m < 0.03:
             return
         print("[BACK] ถอยกลับ {0:.3f} m เข้าช่องเดิม".format(distance_m))
-        start = self.hub.snapshot()
-        start_x, start_y = start.pos_x, start.pos_y
-        target_yaw = self.heading_yaw(heading)
-        deadline = time.time() + (distance_m / BACKUP_SPEED) * 2.0 + 1.0
-
-        while time.time() < deadline:
-            snap = self.hub.snapshot()
-            if not snap.fresh:
-                break
-            if math.hypot(snap.pos_x - start_x, snap.pos_y - start_y) >= distance_m:
-                break
-            yaw_error = wrap_deg(target_yaw - snap.yaw)
-            turn = 0.0
-            if abs(yaw_error) > YAW_HOLD_DEADBAND_DEG:
-                turn = clamp(KP_YAW_HOLD * yaw_error,
-                             -MAX_YAW_CORRECT_DPS, MAX_YAW_CORRECT_DPS)
-            self._drive(x=-BACKUP_SPEED, z=self.yaw_sign * turn)
-            time.sleep(CONTROL_DT)
-
-        self.stop()
-        time.sleep(0.15)
+        self._travel(-BACKUP_SPEED, heading, distance_m, center=False)
 
 
 # =====================================================================
@@ -1357,7 +1485,7 @@ class Payload(object):
             print("[WARN] พาแขนกลับจุดอ้างอิงไม่สำเร็จ: {0}".format(exc))
             print("[WARN] ตำแหน่งแขนที่สั่งต่อจากนี้อาจเพี้ยน")
             return False
-        time.sleep(0.3)
+        time.sleep(ARM_SETTLE_S)
         return True
 
     def _arm_moveto(self, xy, label):
@@ -1377,7 +1505,7 @@ class Payload(object):
         except Exception as exc:                        # noqa: BLE001
             print("[WARN] ขยับแขนไป{0} ไม่สำเร็จ: {1}".format(label, exc))
             return False
-        time.sleep(0.3)
+        time.sleep(ARM_SETTLE_S)
         return True
 
     def _grip(self, fn, label, power, wait_s):
@@ -1502,7 +1630,7 @@ class Payload(object):
             bool: True เมื่อเชื่อว่าวางวัตถุลงแล้ว
         """
         self._arm_moveto(pose, move_label)
-        time.sleep(0.5)             # รอให้แขนนิ่งก่อนปล่อย กันวัตถุล้ม
+        time.sleep(PLACE_SETTLE_S)  # รอให้แขนนิ่งก่อนปล่อย กันวัตถุล้ม
         released = self._release(release_reason)
 
         if not released:
@@ -1514,7 +1642,8 @@ class Payload(object):
 
         self._arm_moveto(ARM_CARRY_XY, "ท่าวิ่ง")
         # หุบกริปเปอร์เบา ๆ ไว้ กันนิ้วกางไปเกี่ยวกำแพงตอนถอยออก
-        self._grip(self.gripper.close, "หุบ", GRIPPER_TUCK_POWER, 1.0)
+        self._grip(self.gripper.close, "หุบ", GRIPPER_TUCK_POWER,
+                   GRIPPER_TUCK_S)
         return True
 
     def place(self):
@@ -1552,6 +1681,46 @@ class Payload(object):
             print("      ก้มลงกางนิ้วเผื่อไว้ เผื่อสถานะอ่านผิดแล้วของยังคาอยู่")
         return self._lower_and_release(ARM_DROP_XY, "จุดวางตอนจบงาน",
                                        "วางวัตถุก่อนจบงาน")
+
+
+def place_on_target(driver, payload, heading, room_behind_m):
+    """วางของที่ช่องเป้าหมาย โดยเล็งด้วยกำแพงก่อนถ้าตั้ง AIM_SEQUENCE ไว้
+
+    การเล็งคือการจัดตำแหน่งทีละแกน โดยหันหน้าเข้าหากำแพงของแกนนั้นแล้วใช้ ToF
+    ซึ่งเป็นเซนเซอร์ตัวเดียวที่คืนระยะเป็นมิลลิเมตรจริง วิธีนี้ทิ้งความคลาด
+    เคลื่อนที่ odometry สะสมมาตลอดทางไปทั้งหมด เพราะกำแพงเป็นจุดอ้างอิงสัมบูรณ์
+
+    ถ้าไม่ได้ตั้ง AIM_SEQUENCE จะกลับไปใช้ทางเดิมคือถอยห่างกำแพงพอให้แขนยื่นได้
+    แล้ววางจากตรงที่จอด ซึ่งวางได้แค่ "ในช่อง" ไม่ใช่ "ตรงจุด"
+
+    Args:
+        driver (Driver): ตัวควบคุมการเคลื่อนที่
+        payload (Payload): แขนกลและกริปเปอร์
+        heading (int): ทิศที่หุ่นหันอยู่ตอนถึงช่องเป้าหมาย
+        room_behind_m (float): ระยะที่ถอยกลับได้อย่างปลอดภัย ใช้เฉพาะทางเดิม
+
+    Returns:
+        int: ทิศที่หุ่นหันอยู่หลังวางเสร็จ
+    """
+    if not AIM_SEQUENCE:
+        if GOAL_WALL_CLEARANCE_MM is not None:
+            driver.back_off_from_wall(GOAL_WALL_CLEARANCE_MM, heading,
+                                      room_behind_m)
+        payload.place()
+        return heading
+
+    print("[AIM] เล็งเป้าก่อนวาง {0} ขั้น".format(len(AIM_SEQUENCE)))
+    for index, (face, target_mm) in enumerate(AIM_SEQUENCE, 1):
+        if face is not None:
+            heading = driver.turn_to(heading, face)
+        print("[AIM] ขั้นที่ {0}/{1} หัน{2} จัดระยะให้ ToF = {3}mm"
+              .format(index, len(AIM_SEQUENCE), DIR_NAMES[heading], target_mm))
+        driver.align_to_wall(target_mm, heading, AIM_MAX_MOVE_M)
+
+    # วางต่อแม้จัดระยะไม่ครบ เพราะวางเยื้องเป้ายังดีกว่าไม่ได้วางเลย
+    # align_to_wall พิมพ์เตือนไว้แล้วว่าขั้นไหนไม่เข้าเป้า
+    payload.place()
+    return heading
 
 
 # =====================================================================
@@ -1623,13 +1792,11 @@ def run_search(hub, driver, payload):
                   .format((x, y), moves))
             driver.stop()
             if payload is not None:
-                if GOAL_WALL_CLEARANCE_MM is not None:
-                    # เพดานการถอยคือระยะที่เพิ่งเดินเข้าช่องนี้มา เพราะนั่นคือ
-                    # พื้นที่เดียวข้างหลังที่หุ่นเพิ่งผ่านมาเองแล้วว่าโล่งจริง
-                    # แผนที่บอกไม่ได้ เพราะ goal ถูกเช็คก่อน observe() ที่ช่องนี้
-                    driver.back_off_from_wall(GOAL_WALL_CLEARANCE_MM, heading,
-                                              entry_travel)
-                payload.place()
+                # entry_travel = ระยะที่เพิ่งเดินเข้าช่องนี้มา ซึ่งเป็นพื้นที่
+                # เดียวข้างหลังที่หุ่นเพิ่งผ่านมาเองแล้วว่าโล่งจริง แผนที่บอก
+                # ไม่ได้ เพราะ goal ถูกเช็คก่อน observe() ที่ช่องนี้
+                heading = place_on_target(driver, payload, heading,
+                                          entry_travel)
             print(maze.render(robot=(x, y, heading), legend=True))
             return True
 

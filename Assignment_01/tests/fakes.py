@@ -34,6 +34,12 @@ def load():
     tc.PAYLOAD_LOAD_S = 0.01
     tc.ARMTEST_TOF_SAMPLES = 3
     tc.SETTLE_S = 0.0
+    # ย่นเวลาหน่วงของแขนและ control loop ทิ้ง ไม่กระทบสิ่งที่เทสต์ตรวจ เพราะ
+    # หุ่นปลอมตอบทันทีอยู่แล้ว และฟิสิกส์ของ Corridor อินทิเกรตด้วย dt ของตัวเอง
+    tc.CONTROL_DT = 0.0
+    tc.ARM_SETTLE_S = 0.0
+    tc.PLACE_SETTLE_S = 0.0
+    tc.GRIPPER_TUCK_S = 0.01
     return tc
 
 
@@ -331,6 +337,8 @@ class TruthDriver(object):
         self.turns = []
         #: list: อาร์กิวเมนต์ของทุกครั้งที่ run_search สั่งถอยห่างกำแพง
         self.backoffs = []
+        #: list: อาร์กิวเมนต์ของทุกครั้งที่ถูกสั่งจัดระยะเทียบกำแพง
+        self.aligns = []
 
     def stop(self):
         pass
@@ -348,6 +356,20 @@ class TruthDriver(object):
         print("[BACKOFF] (จำลอง) ต้องการ {0}mm เพดาน {1:.3f} m"
               .format(clearance_mm, limit_m))
         return clearance_mm, 0.0, "clear"
+
+    def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None):
+        """บันทึกว่าถูกสั่งจัดระยะ โดยไม่ขยับโลกจำลอง
+
+        เหตุผลเดียวกับ back_off_from_wall คือ TruthWorld หยาบระดับช่อง
+        การจัดระยะจริงถูกทดสอบแยกด้วย Corridor กับ Driver ตัวจริง
+
+        Returns:
+            tuple: (tof_mm, moved_m, reason) แบบเดียวกับ Driver ตัวจริง
+        """
+        self.aligns.append((target_mm, heading, budget_m))
+        print("[ALIGN] (จำลอง) เป้า {0}mm หัน {1}"
+              .format(target_mm, self.world.tc.DIR_NAMES[heading]))
+        return target_mm, 0.0, "stop"
 
     def turn_to(self, current_heading, target_heading):
         if current_heading != target_heading:
