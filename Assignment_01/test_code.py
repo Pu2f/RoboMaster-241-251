@@ -6,6 +6,14 @@
 อย่างเดียว ไม่มี return run / speed run) ระหว่างทางหุ่นคีบวัตถุไว้ และวางลงเมื่อ
 ถึงช่องเป้าหมาย
 
+การได้วัตถุมาคีบคุมด้วยสองค่าที่ไม่เกี่ยวกัน ไม่ใช่ "โหมด" ที่ผูกกันเป็นชุด
+- ``PICK_CELL``   หยิบที่ช่องไหน (ค่าเริ่มต้น ``START_CELL`` คือหยิบตรงจุดเริ่ม)
+- ``ARM_PICK_XY`` หยิบยังไง ``None`` = คนวางใส่มือ, เป็นพิกัด = ยื่นแขนหยิบเอง
+
+ทั้งสองค่าเดินผ่านโค้ดเส้นทางเดียวกันหมด คือ Flood Fill จะพาหุ่นไป ``PICK_CELL``
+ก่อน (ถ้าเป็นช่องเริ่มต้นก็ไม่ต้องขยับ) หยิบของ แล้วค่อยตั้งเป้าใหม่ไป
+``GOAL_CELLS`` จึงไม่มีเส้นทางไหนที่ไม่เคยถูกรันเลยในคอนฟิกปกติ
+
 ฮาร์ดแวร์ที่ต้องต่อ
 ------------------
 - ToF (Distance Sensor) ด้านหน้า        -> sensor.sub_distance()
@@ -18,8 +26,10 @@
 วิธีใช้
 ------
     python test_code.py --calib    วัดค่าเซนเซอร์จริง (ต้องทำก่อนใช้งานครั้งแรก)
+    python test_code.py --armtest  จูนท่าแขนกับวัตถุจริง หุ่นไม่เดินไปไหน
     python test_code.py --sim      ทดสอบตรรกะ Flood Fill โดยไม่ต้องต่อหุ่น
     python test_code.py            วิ่งจริงในสนาม
+    python tests/run_tests.py      รันเทสต์ทั้งหมดด้วยหุ่นปลอม
 
 ข้อควรรู้เรื่อง SDK (ตรวจสอบจาก source ใน src/robomaster/ แล้ว)
 --------------------------------------------------------------
@@ -38,6 +48,12 @@
 6. ``robotic_arm.moveto()`` เป็นพิกัด "สัมบูรณ์" (robotic_arm.py:123 ส่ง mode=1)
    ไม่ใช่ระยะเลื่อนจากท่าปัจจุบัน ต้องเรียก ``recenter()`` พาแขนกลับจุดอ้างอิง
    ก่อนใช้งานครั้งแรก ไม่งั้นตำแหน่งที่สั่งจะเพี้ยนตามท่าที่แขนค้างอยู่ตอนบูต
+7. ช่วงการเคลื่อนที่ของแขนคือ x 0-220 mm และ y 0-150 mm (คู่มือในโปรเจกต์นี้เอง
+   docs/source/extension_module/robotic_arm_and_gripper.rst:16) และกริปเปอร์
+   กางได้ราว 100 mm ค่าติดลบหรือเกินช่วงนี้ไม่มีใครดักให้ - SDK ไม่ตรวจช่วงเลย
+   (util.py:150 ตั้ง start/end เป็น None) จะถูกส่งลงเฟิร์มแวร์ตรง ๆ แล้วแขนก็ไป
+   ค้างที่ลิมิตกลไกเอง สังเกตได้จาก sub_position ที่ถอดค่าเป็น unsigned ('<II'
+   ที่ robotic_arm.py:52) คือตำแหน่งติดลบไม่มีทางถูกรายงานกลับมาได้เลย
 """
 
 import argparse
@@ -63,12 +79,12 @@ else:
 # =====================================================================
 
 # ---------- ขนาดสนามและเป้าหมาย ----------
-MAZE_W = 4                      # จำนวนช่องแกน X (ทิศตะวันออกเป็นบวก)
-MAZE_H = 4                      # จำนวนช่องแกน Y (ทิศเหนือเป็นบวก)
+MAZE_W = 5                      # จำนวนช่องแกน X (ทิศตะวันออกเป็นบวก)
+MAZE_H = 6                      # จำนวนช่องแกน Y (ทิศเหนือเป็นบวก)
 CELL_SIZE_M = 0.60              # ความกว้าง 1 ช่อง หน่วยเมตร
 START_CELL = (0, 0)
 START_HEADING = 0                # 0=North 1=East 2=South 3=West
-GOAL_CELLS = [(3, 3)]           # รองรับหลายช่อง เช่นโซนกลาง 2x2 ของ micromouse
+GOAL_CELLS = [(3, 4)]           # รองรับหลายช่อง เช่นโซนกลาง 2x2 ของ micromouse
 
 # ---------- การต่อสายเซนเซอร์ ----------
 TOF_INDEX = 0                   # sub_distance คืน list 4 ตัว ใช้ตัวไหนเป็นด้านหน้า
@@ -81,12 +97,12 @@ IR_RIGHT_45 = (3, 1)            # (hub_id, port) อ่านด้วย IO (di
 # ตราบใดที่ยังเป็น None โปรแกรมจะปฏิเสธที่จะวิ่งในสนามจริง
 # เหตุผล: threshold ที่ผิดทำให้หุ่น "วิ่งดูปกติทุกอย่างแต่สร้างแผนที่ผิด"
 # ซึ่งแยกไม่ออกจากบั๊กของ odometry หรือของ flood fill ตอนอยู่หน้าสนาม
-SHARP_LEFT_WALL_ADC = (211, 189)      # (enter, exit) ทำ hysteresis กันค่ากระพริบ
-SHARP_RIGHT_WALL_ADC = (297, 278)    # (enter, exit)
-SHARP_LEFT_REF = 350     # ค่า ADC ซ้าย ตอนหุ่นอยู่กลางช่องพอดี
-SHARP_RIGHT_REF = 386          # ค่า ADC ขวา ตอนหุ่นอยู่กลางช่องพอดี
+SHARP_LEFT_WALL_ADC = (387, 351)      # (enter, exit) ทำ hysteresis กันค่ากระพริบ
+SHARP_RIGHT_WALL_ADC = (381, 371)    # (enter, exit)
+SHARP_LEFT_REF = 374     # ค่า ADC ซ้าย ตอนหุ่นอยู่กลางช่องพอดี
+SHARP_RIGHT_REF = 376          # ค่า ADC ขวา ตอนหุ่นอยู่กลางช่องพอดี
 IR_TRIGGERED_VALUE = 0       # ค่า IO ตอนมีสิ่งกีดขวาง (0 หรือ 1)
-FRONT_STOP_MM = 75            # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
+FRONT_STOP_MM = 50            # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
 
 FRONT_WALL_MM_OVERRIDE = None   # ปกติปล่อย None ให้คำนวณจากเรขาคณิตของช่อง
 
@@ -134,15 +150,52 @@ MOVE_TIMEOUT_RATIO = 2.0        # timeout = (CELL_SIZE_M / BASE_SPEED) * ค่�
 
 # ---------- payload (คีบ / วางวัตถุ) ----------
 DO_PAYLOAD = True               # ปิดชั่วคราวได้ตอนดีบักเฉพาะการเดิน
-ARM_CARRY_XY = (100, 50)        # ตำแหน่งแขนตอนวิ่ง (mm) ต้องไม่บัง ToF
-ARM_PLACE_XY = (180, -40)       # ตำแหน่งแขนตอนวางของ (mm)
+# ท่าแขนทุกค่าในไฟล์นี้ต้องอยู่ในช่วง x 0-220 mm, y 0-150 mm (ดูหมายเหตุ SDK
+# ข้อ 7 หัวไฟล์) y = 0 คือต่ำสุดติดพื้น ไม่มีค่าติดลบ
+ARM_CARRY_XY = (0, 150)        # ตำแหน่งแขนตอนวิ่ง (mm) ต้องไม่บัง ToF
+ARM_PLACE_XY = (220, 0)         # ตำแหน่งแขนตอนวางของ (mm) ยื่นไกลกว่าท่าวิ่ง
+                                # ให้ของพ้นตัวหุ่นก่อนปล่อย และ y = 0 คือติดพื้น
+# ท่าวางตอนจบงานแบบไม่ถึงเป้าหมาย (เซนเซอร์หลุด / ไปต่อไม่ได้ / Ctrl-C)
+# ตั้งให้ยื่นสั้นกว่า ARM_PLACE_XY โดยตั้งใจ เพราะการจบแบบนี้เกิดตอนหุ่นจอดอยู่
+# ที่ไหนก็ไม่รู้ - เคส "ไปเป้าหมายไม่ได้แล้ว" กับ "ถูกล้อมทุกด้าน" คือหุ่นจอด
+# หันชนกำแพงพอดี ถ้ายื่นสุดแขน 220 mm ของกับนิ้วจะไปกระแทกกำแพงแทนที่จะวางลง
+# พื้น ที่ 110 mm ของยังพ้นล้อหน้าแต่ไม่ชนกำแพงที่ห่าง FRONT_STOP_MM
+ARM_DROP_XY = (110, 0)
 GRIPPER_POWER = 50
 GRIPPER_TUCK_POWER = 30         # แรงหุบเบา ๆ ตอนมือเปล่า กันนิ้วเกี่ยวกำแพง
 PAYLOAD_LOAD_S = 2.0            # เวลากางกริปเปอร์ค้างไว้ให้วางวัตถุก่อนหุบคีบ
 GRIPPER_ACT_S = 1.5             # เวลารอให้นิ้วขยับจนสุด (ไม่มี action ให้รอ)
+GRIPPER_RELEASE_TRIES = 3       # สั่งกางซ้ำได้กี่ครั้งตอนปล่อยของ
 GRIPPER_STATUS_FREQ = 5         # Hz ของ sub_status สถานะเปลี่ยนช้า ไม่ต้องถี่
 GRIPPER_STATUS_STALE_S = 1.5    # เกินนี้ถือว่าสถานะค้างเก่า เอามาตัดสินไม่ได้
 ARM_TIMEOUT_S = 6               # timeout ของ action แขนกล (วินาที)
+
+# ---------- payload: หยิบที่ไหน และหยิบยังไง ----------
+# สองค่านี้ไม่เกี่ยวกัน ผสมกันได้อิสระ ปิดการคีบทั้งหมดด้วย --no-payload
+#
+# PICK_CELL = ช่องที่หุ่นไปยืนหยิบของ
+#   START_CELL  หยิบตรงจุดเริ่มโดยไม่ต้องขยับ (ค่าเริ่มต้น)
+#   (1, 0) ฯลฯ  Flood Fill พาไปช่องนั้นก่อน แล้วค่อยตั้งเป้าใหม่ไป GOAL_CELLS
+#   ถ้าให้หุ่นวิ่งไปหยิบที่ช่องอื่น ต้องวางของไว้ "กลางช่อง" เท่านั้น เพราะ
+#   1. ToF จะเห็นแล้วเบรกให้เองที่ FRONT_STOP_MM ซึ่งเป็นระยะหยิบที่ซ้ำเดิมได้
+#   2. ถ้าวางชิดขอบช่อง ToF จะเห็นเป็นกำแพงตั้งแต่ยังอยู่ช่องก่อนหน้า (เกณฑ์ =
+#      FRONT_STOP_MM + ครึ่งช่อง) แล้ว Maze จะปิดทางเข้าช่องนั้น "ถาวร" เพราะ
+#      set_wall เพิ่มกำแพงได้อย่างเดียว ลบออกไม่ได้ (ดู Maze.set_wall)
+#
+# ARM_PICK_XY = วิธีหยิบ
+#   None        กางกริปเปอร์ค้าง PAYLOAD_LOAD_S วินาทีให้คนวางของใส่มือ
+#               ทนต่อการวางคลาดเคลื่อนที่สุด ไม่ต้องจูนอะไรเลย (ค่าเริ่มต้น)
+#   (x, y)      ยื่นแขนลงไปหยิบเองที่ท่านั้น ต้องจูนกับของจริงก่อนด้วย --armtest
+#               และของต้องอยู่ในระยะเอื้อม (x 0-220 mm, y 0-150 mm)
+PICK_CELL = START_CELL          # หยิบตรงจุดเริ่ม ไม่ต้องขยับไปไหน
+# ARM_PICK_XY = None              # คนวางของใส่มือให้
+# PICK_CELL = (1, 0)            # ให้หุ่นวิ่งไปหยิบเองที่ช่องนี้
+ARM_PICK_XY = (220, 0)        # ให้ยื่นแขนหยิบเองที่ท่านี้ (จูนด้วย --armtest)
+
+# แขน EP ไม่มีแกนหมุนซ้ายขวา (moveto รับแค่ x, y) การเล็งจึงต้องอาศัยแชสซีหัน
+# ให้ตรงอย่างเดียว ปกติไม่ต้องตั้ง เพราะหุ่นจอดหันหน้าใส่ของอยู่แล้วตอน ToF เบรก
+# ตั้งเมื่อรู้ว่าของเยื้องไปทางใดทางหนึ่งของช่องเท่านั้น
+PICK_HEADING = None             # ทิศที่ต้องหันก่อนหยิบ (0=N 1=E 2=S 3=W)
 
 # ---------- ระบบ ----------
 CONTROL_DT = 0.04               # คาบของ control loop
@@ -1146,6 +1199,15 @@ class Payload(object):
         self._subscribed = False
         #: bool: True เมื่อเชื่อว่าคีบวัตถุอยู่ ใช้ตัดสินว่าต้องปล่อยตอนจบไหม
         self.holding = False
+        #: bool: True เมื่อสั่งหุบคีบของไปแล้วและยังไม่ได้กางปล่อย
+        #:
+        #: แยกจาก ``holding`` เพราะ ``holding`` เชื่อ ``_confirm_grip()`` ซึ่ง
+        #: ตัดสินผิดฝั่งอันตรายได้ - ของบางหรือนิ่มทำให้นิ้วหุบเกือบสุดจนสถานะ
+        #: รายงาน "closed" (= ไม่มีอะไรคาอยู่) ทั้งที่ยังคีบของอยู่จริง ถ้าเชื่อ
+        #: ``holding`` อย่างเดียว ตอนจบงานจะไม่ปล่อยอะไรเลย ของค้างในมือและ
+        #: มอเตอร์บีบค้างยาวจนกว่าจะปิดเครื่อง ธงนี้จึงบันทึก "ข้อเท็จจริงเชิง
+        #: คำสั่ง" ที่ตัดสินผิดไม่ได้ คือสั่งหุบไปแล้วหรือยัง
+        self.grip_closed = False
 
     # ---------- callback (ทำงานบนเธรดของ DDS) ----------
     def _on_status(self, status):
@@ -1276,18 +1338,29 @@ class Payload(object):
             bool: True เมื่อเชื่อว่าปล่อยออกไปแล้ว
         """
         print("[ARM] กางกริปเปอร์{0}".format(reason))
-        self._grip(self.gripper.open, "กาง", GRIPPER_POWER, GRIPPER_ACT_S)
-        status = self.status()
-        if status == "closed" or status == "normal":
-            print("[WARN] สั่งกางแล้วแต่สถานะยังเป็น {0} วัตถุอาจค้างอยู่"
-                  .format(status))
-            return False
-        # "" = ไม่มีข้อมูลให้ตรวจ ถือว่าปล่อยแล้วเพื่อไม่ให้วนสั่งกางซ้ำตอนจบงาน
-        self.holding = False
-        return True
+        for attempt in range(1, GRIPPER_RELEASE_TRIES + 1):
+            self._grip(self.gripper.open, "กาง", GRIPPER_POWER, GRIPPER_ACT_S)
+            status = self.status()
+            if status != "closed" and status != "normal":
+                # "opened" = ยืนยันว่านิ้วกางสุด ส่วน "" = ไม่มีข้อมูลตรวจ
+                # ซึ่งถือว่าปล่อยแล้ว ไม่งั้นจะวนสั่งกางซ้ำไปเรื่อยตอนจบงาน
+                self.holding = False
+                self.grip_closed = False
+                return True
+            print("[WARN] กางครั้งที่ {0}/{1} แล้วสถานะยังเป็น {2}"
+                  .format(attempt, GRIPPER_RELEASE_TRIES, status))
 
-    def pick_up(self):
+        print("[WARN] ปล่อยวัตถุไม่ออก อาจเพราะนิ้วกางไม่สุดเนื่องจากติดพื้น")
+        print("       ลองยก y ของท่าวางขึ้นสัก 20-30 mm ให้นิ้วกางได้อิสระ")
+        return False
+
+    def pick_up(self, reach_xy=None):
         """พาแขนเข้าจุดอ้างอิง กางกริปเปอร์รับวัตถุ แล้วหุบคีบเก็บเข้าท่าวิ่ง
+
+        Args:
+            reach_xy: ท่าแขนที่ยื่นลงไปหยิบของก่อนหุบ ปกติส่ง ARM_PICK_XY มา
+                ถ้าเป็น None จะไม่ยื่นแขนไปไหน แต่กางนิ้วค้างไว้
+                PAYLOAD_LOAD_S วินาทีให้คนวางของใส่มือแทน
 
         Returns:
             bool: True เมื่อเชื่อว่าคีบวัตถุติดจริง
@@ -1297,42 +1370,93 @@ class Payload(object):
         self._arm_recenter()
 
         # กางกริปเปอร์ก่อนเสมอ ถ้าตอนบูตนิ้วหุบอยู่แล้ว close() ข้างล่างจะไม่มี
-        # ผลอะไรเลย หุ่นจะวิ่งออกไปทั้งที่ไม่ได้คีบอะไรมา
-        print("[ARM] กางกริปเปอร์ รอวางวัตถุ {0:.1f} วินาที"
-              .format(PAYLOAD_LOAD_S))
-        self._grip(self.gripper.open, "กาง", GRIPPER_POWER,
-                   GRIPPER_ACT_S + PAYLOAD_LOAD_S)
+        # ผลอะไรเลย หุ่นจะวิ่งออกไปทั้งที่ไม่ได้คีบอะไรมา และต้องกางก่อนยื่นแขน
+        # ลงไปด้วย ให้นิ้วครอบวัตถุลงไป ไม่ใช่เอานิ้วที่หุบอยู่ไปเขี่ยมันล้ม
+        if reach_xy is None:
+            print("[ARM] กางกริปเปอร์ รอวางวัตถุ {0:.1f} วินาที"
+                  .format(PAYLOAD_LOAD_S))
+            open_wait = GRIPPER_ACT_S + PAYLOAD_LOAD_S
+        else:
+            print("[ARM] กางกริปเปอร์ก่อนยื่นแขนลงไปหยิบ")
+            open_wait = GRIPPER_ACT_S
+        self._grip(self.gripper.open, "กาง", GRIPPER_POWER, open_wait)
+
+        if reach_xy is not None:
+            self._arm_moveto(reach_xy, "ท่าหยิบของ")
 
         print("[ARM] หุบกริปเปอร์คีบวัตถุ")
-        self._grip(self.gripper.close, "หุบ", GRIPPER_POWER, GRIPPER_ACT_S)
+        # ตั้ง grip_closed จาก "คำสั่งออกไปได้ไหม" ไม่ใช่จากสถานะที่อ่านกลับมา
+        # เพราะสถานะคือสิ่งที่เชื่อไม่ได้ตั้งแต่แรก ส่วนคำสั่งที่ throw ไปเลย
+        # แปลว่านิ้วไม่ได้บีบอะไรไว้จริง ๆ
+        self.grip_closed = self._grip(self.gripper.close, "หุบ",
+                                      GRIPPER_POWER, GRIPPER_ACT_S)
         self.holding = self._confirm_grip()
 
         self._arm_moveto(ARM_CARRY_XY, "ท่าวิ่ง")
         return self.holding
 
-    def place(self):
-        """ยื่นแขนออกไปวางวัตถุ แล้วเก็บแขนกลับ
+    def _lower_and_release(self, pose, move_label, release_reason):
+        """ก้มแขนลงไปที่ pose ปล่อยวัตถุ แล้วเก็บแขนกลับท่าวิ่ง
+
+        Args:
+            pose: ท่าแขนตอนปล่อยของ (x, y) หน่วย mm
+            move_label: ชื่อท่าที่เอาไว้พิมพ์ log
+            release_reason: เหตุผลที่ปล่อย เอาไว้พิมพ์ log
 
         Returns:
             bool: True เมื่อเชื่อว่าวางวัตถุลงแล้ว
         """
-        self._arm_moveto(ARM_PLACE_XY, "จุดวางของ")
-        time.sleep(0.5)             # รอให้แขนนิ่งก่อนปล่อย กันวัตถุกระเด็น
-        released = self._release("วางวัตถุ")
+        self._arm_moveto(pose, move_label)
+        time.sleep(0.5)             # รอให้แขนนิ่งก่อนปล่อย กันวัตถุล้ม
+        released = self._release(release_reason)
+
+        if not released:
+            # ห้ามหุบนิ้วตรงนี้เด็ดขาด ถ้าวัตถุยังคาอยู่จริง การหุบคือการคีบมัน
+            # กลับขึ้นมาใหม่ ซึ่งเท่ากับไม่ได้วางอะไรลงเลย ปล่อยแขนค้างต่ำและ
+            # กางนิ้วไว้แบบนั้น ให้คนหยิบวัตถุออกได้ง่ายที่สุด
+            print("[ARM] คาแขนไว้ที่ท่าวางและกางนิ้วค้างไว้ ให้เอาวัตถุออกเอง")
+            return False
 
         self._arm_moveto(ARM_CARRY_XY, "ท่าวิ่ง")
         # หุบกริปเปอร์เบา ๆ ไว้ กันนิ้วกางไปเกี่ยวกำแพงตอนถอยออก
         self._grip(self.gripper.close, "หุบ", GRIPPER_TUCK_POWER, 1.0)
-        return released
+        return True
 
-    def release_if_holding(self):
-        """ปล่อยวัตถุที่ยังคีบค้างอยู่ ใช้ตอนจบงานแบบไม่สำเร็จ
+    def place(self):
+        """ยื่นแขนออกไปวางวัตถุที่ช่องเป้าหมาย แล้วเก็บแขนกลับ
 
-        ถ้าปล่อยให้หุบคาวัตถุไว้ มอเตอร์จะออกแรงบีบค้างจนกว่าจะปิดเครื่อง
+        Returns:
+            bool: True เมื่อเชื่อว่าวางวัตถุลงแล้ว
         """
-        if not self.holding:
-            return
-        self._release("ปล่อยวัตถุก่อนจบงาน")
+        return self._lower_and_release(ARM_PLACE_XY, "จุดวางของ", "วางวัตถุ")
+
+    def put_down_if_holding(self):
+        """ก้มวางวัตถุลงพื้นเมื่อจบงานแบบไม่ถึงเป้าหมาย
+
+        ครอบคลุมทุกทางที่จบโดยไม่ได้เรียก place() คือเซนเซอร์ขาดการอัปเดต
+        ไปเป้าหมายไม่ได้แล้ว ช่องถูกล้อมทุกด้าน เดินครบ MAX_STEPS และ Ctrl-C
+
+        ก้มลงวางแทนที่จะกางนิ้วปล่อยเฉย ๆ เพราะปล่อยจากท่าวิ่งของจะตกกระแทกพื้น
+        แล้วล้มกลิ้ง ส่วนการปล่อยให้หุบคาวัตถุไว้ก็ทำให้มอเตอร์กริปเปอร์บีบค้าง
+        ไปจนกว่าจะปิดเครื่อง
+
+        เกณฑ์คือ ``holding`` หรือ ``grip_closed`` ไม่ใช่ ``holding`` อย่างเดียว
+        เพราะความผิดพลาดสองฝั่งราคาไม่เท่ากัน ``holding`` ที่ผิดว่ามือเปล่าแล้ว
+        ไม่ปล่อย คือของค้างในมือและมอเตอร์บีบค้างจนกว่าจะปิดเครื่อง ส่วนการปล่อย
+        เผื่อทั้งที่มือเปล่า แค่เสียเวลาก้มแขนหนึ่งครั้งตอนจบงาน
+
+        Returns:
+            bool: True เมื่อวางลงแล้ว หรือไม่ได้สั่งหุบอะไรไว้แต่แรก
+        """
+        if not self.holding and not self.grip_closed:
+            return True
+        if self.holding:
+            print("[ARM] ยังคีบวัตถุอยู่ ก้มวางลงพื้นก่อนจบงาน")
+        else:
+            print("[ARM] สถานะบอกว่ามือเปล่า แต่สั่งหุบค้างไว้ตั้งแต่ตอนหยิบ")
+            print("      ก้มลงกางนิ้วเผื่อไว้ เผื่อสถานะอ่านผิดแล้วของยังคาอยู่")
+        return self._lower_and_release(ARM_DROP_XY, "จุดวางตอนจบงาน",
+                                       "วางวัตถุก่อนจบงาน")
 
 
 # =====================================================================
@@ -1355,19 +1479,49 @@ def run_search(hub, driver, payload):
                   DIR_NAMES[START_HEADING], GOAL_CELLS))
     print("=" * 62)
 
-    if payload is not None and not payload.pick_up():
-        # เดินสำรวจต่อได้อยู่ แค่ไม่มีของไปวางที่เป้าหมาย ให้คนคุมเห็นชัด ๆ
-        print("[WARN] ไม่ได้คีบวัตถุมาด้วย จะเดินสำรวจต่อแต่ไม่มีของไปวาง")
+    # ตั้งเป้าเฟสแรกไปที่ช่องหยิบของเสมอ ถ้าเป็นช่องเริ่มต้นก็แค่หยิบอยู่กับที่
+    # โดยไม่ขยับ ทำแบบนี้เพื่อให้ทุกคอนฟิกเดินผ่านโค้ดชุดเดียวกันหมด
+    pick_pending = payload is not None and PICK_CELL is not None
+    if pick_pending:
+        maze.goals = [tuple(PICK_CELL)]
+        if tuple(PICK_CELL) != tuple(START_CELL):
+            print("[PLAN] เฟส 1 ไปหยิบของที่ช่อง {0} แล้วค่อยไปเป้าหมาย {1}"
+                  .format(tuple(PICK_CELL), GOAL_CELLS))
+    elif payload is not None:
+        print("[WARN] PICK_CELL เป็น None จะไม่หยิบอะไรเลยแต่ยังสั่งวางตอนจบ")
+        print("       ถ้าตั้งใจจะไม่คีบของ ให้ใช้ --no-payload แทน")
 
     # นับความล้มเหลวซ้ำที่ (ช่อง, ทิศ) เดิม ใช้ตัดวงจรกรณีเดินไม่ผ่านแต่ ToF
     # ก็ไม่เห็นกำแพง (ล้อลื่น ติดขอบ ฯลฯ) ซึ่งถ้าไม่ตัดจะเลือกทิศเดิมซ้ำไปเรื่อย ๆ
     fail_key = None
     fail_count = 0
+    # นับ "ช่องที่เดินผ่านจริง" แยกจากรอบของลูป เพราะรอบที่หยิบของ รอบที่เดินไม่
+    # ผ่าน และรอบที่ยกเลิกเพราะ SAFETY ก็กินรอบไปด้วยทั้งที่หุ่นไม่ได้ย้ายช่อง
+    moves = 0
 
     for step in range(MAX_STEPS):
+        if (x, y) in maze.goals and pick_pending:
+            # ToF เบรกให้หน้าวัตถุที่ FRONT_STOP_MM แล้ว หยิบได้เลยจากตรงนี้
+            # หมายเหตุ: ยังไม่มีการ observe() ที่ช่องนี้ เพราะ goal ถูกเช็คก่อน
+            # ดังนั้นวัตถุจึงไม่ถูกบันทึกเป็นกำแพงหน้าลงแผนที่ ซึ่งลบออกไม่ได้
+            if ARM_PICK_XY is None:
+                print("\n[PICK] รับวัตถุที่ช่อง {0}".format((x, y)))
+            else:
+                print("\n[PICK] ถึงช่องหยิบของ {0} แล้ว เดินมา {1} ช่อง"
+                      .format((x, y), moves))
+            driver.stop()
+            if PICK_HEADING is not None:
+                heading = driver.turn_to(heading, PICK_HEADING)
+            if not payload.pick_up(reach_xy=ARM_PICK_XY):
+                print("[WARN] ไม่ได้คีบวัตถุมาด้วย จะเดินต่อแต่ไม่มีของไปวาง")
+            maze.goals = list(GOAL_CELLS)
+            pick_pending = False
+            print("[PLAN] มุ่งหน้าไปเป้าหมาย {0}".format(maze.goals))
+            continue
+
         if (x, y) in maze.goals:
-            print("\n[GOAL] ถึงช่องเป้าหมาย {0} แล้ว ใช้ไป {1} ก้าว"
-                  .format((x, y), step))
+            print("\n[GOAL] ถึงช่องเป้าหมาย {0} แล้ว เดินมา {1} ช่อง"
+                  .format((x, y), moves))
             driver.stop()
             if payload is not None:
                 payload.place()
@@ -1423,6 +1577,7 @@ def run_search(hub, driver, payload):
         ok, traveled, _ = driver.advance_one_cell(heading)
         if ok:
             x, y = x + DX[heading], y + DY[heading]
+            moves += 1
             fail_key = None
             fail_count = 0
         else:
@@ -1690,6 +1845,87 @@ def run_calibration(hub):
 
 
 # =====================================================================
+# โหมด --armtest : จูนท่าแขนกับวัตถุจริง โดยไม่ต้องรันทั้งเขาวงกต
+# =====================================================================
+ARMTEST_TOF_SAMPLES = 20        # จำนวนครั้งที่อ่าน ToF ตอนเช็คว่าของบังหรือไม่
+
+
+def run_arm_test(hub, payload):
+    """ยื่นแขนหยิบของที่วางไว้ตรงหน้า แล้วรายงานว่าใช้ค่าปัจจุบันได้จริงไหม
+
+    มีสองอย่างที่ต้องรู้ก่อนใช้ ARM_PICK_XY จริง ทั้งคู่ต้องวัดกับของจริง
+    1. ``ARM_PICK_XY`` เอื้อมถึงของและคีบติดหรือเปล่า
+    2. ของที่คีบแล้วยกขึ้นท่าวิ่ง ไปบัง ToF หรือเปล่า ซึ่งถ้าบังหุ่นจะเห็นเป็น
+       กำแพงหน้าตลอดทางแล้วเดินไม่ได้เลย ของสูง ๆ อย่างขวดน้ำเจอปัญหานี้ง่ายมาก
+
+    Returns:
+        bool: True เมื่อคีบติดและของที่คีบไม่บัง ToF
+    """
+    print("\n" + "=" * 62)
+    print("  ARM TEST - จูนท่าแขนกับวัตถุจริง")
+    print("  ARM_PICK_XY  = {0}".format(ARM_PICK_XY))
+    print("  ARM_CARRY_XY = {0}".format(ARM_CARRY_XY))
+    print("  ARM_PLACE_XY = {0}".format(ARM_PLACE_XY))
+    print("=" * 62)
+    if ARM_PICK_XY is None:
+        print("\n[STOP] ARM_PICK_XY เป็น None = ตั้งไว้ให้คนวางของใส่มือ")
+        print("       โหมดนี้มีไว้จูนท่ายื่นแขน ตั้ง ARM_PICK_XY เป็นพิกัดก่อน")
+        return False
+
+    print("\nวางวัตถุไว้ตรงหน้าหุ่น ให้อยู่กึ่งกลางลำตัว")
+    print("และอยู่ในระยะที่แขนเอื้อมถึง")
+    print("(แขนยื่นได้ไกลสุด 220 mm วัดจากฐานแขน)")
+    input("พร้อมแล้วกด Enter...")
+
+    gripped = payload.pick_up(reach_xy=ARM_PICK_XY)
+    if not gripped:
+        print("\n[ARMTEST] คีบไม่ติด ลองปรับ ARM_PICK_XY แล้วรันใหม่")
+        print("          x น้อยลง = หดเข้าหาตัว, y น้อยลง = ต่ำลงติดพื้น")
+        print("          ช่วงที่สั่งได้คือ x 0-220 mm, y 0-150 mm")
+
+    # ของอยู่ในมือที่ท่าวิ่งแล้ว ตรงนี้คือจุดที่ ToF ต้องยังมองทะลุไปข้างหน้าได้
+    print("\n[ARMTEST] อ่าน ToF ตอนคีบของค้างไว้ที่ท่าวิ่ง...")
+    readings = []
+    for _ in range(ARMTEST_TOF_SAMPLES):
+        snap = hub.snapshot()
+        if snap.tof_mm is not None:
+            readings.append(snap.tof_mm)
+        time.sleep(0.1)
+
+    threshold = front_wall_threshold_mm()
+    blocked = True
+    if not readings:
+        print("[ARMTEST] ไม่ได้ค่า ToF เลย ตรวจการต่อเซนเซอร์ก่อน")
+    else:
+        avg = sum(readings) / float(len(readings))
+        print("[ARMTEST] ToF เฉลี่ย {0:.0f} mm "
+              "(ต่ำสุด {1} สูงสุด {2} จาก {3} ครั้ง)"
+              .format(avg, min(readings), max(readings), len(readings)))
+        blocked = avg < threshold
+        if blocked:
+            print("[ARMTEST] ต่ำกว่าเกณฑ์กำแพงหน้า {0} mm = ของบัง ToF อยู่"
+                  .format(threshold))
+            print("          หุ่นจะเห็นเป็นกำแพงตลอดทางแล้วเดินไม่ได้")
+            print("          แก้ที่ ARM_CARRY_XY: ยก y สูงขึ้น (ไม่เกิน 150)")
+            print("          หรือหด x ให้เข้าหาตัวมากขึ้น แล้วรันใหม่")
+        else:
+            print("[ARMTEST] ไม่บัง ToF (เกณฑ์กำแพงหน้าคือ {0} mm)"
+                  .format(threshold))
+
+    input("\nกด Enter เพื่อให้หุ่นวางของลง...")
+    placed = payload.place()
+
+    ok = gripped and not blocked and placed
+    print("\n" + "=" * 62)
+    print("  สรุป: คีบติด {0} | ไม่บัง ToF {1} | วางลงได้ {2}"
+          .format("ใช่" if gripped else "ไม่", "ใช่" if not blocked else "ไม่",
+                  "ใช่" if placed else "ไม่"))
+    print("  {0}".format("ค่าปัจจุบันใช้ได้" if ok else "ยังต้องปรับค่าอีก"))
+    print("=" * 62)
+    return ok
+
+
+# =====================================================================
 # โหมด --sim : ทดสอบตรรกะ Flood Fill โดยไม่ต้องต่อหุ่น
 # =====================================================================
 #: list: คู่ช่องที่มีกำแพงกั้นระหว่างกันในเขาวงกตจำลอง
@@ -1752,9 +1988,26 @@ def run_sim():
     heading = START_HEADING
     path = [(x, y)]
 
+    # จำลองการสลับเป้าหมายสองเฟสด้วย เพื่อให้ตรวจแผนการเดินได้ก่อนลงสนามจริง
+    # ส่วนการคีบจริงไม่มีอะไรให้จำลอง
+    pick_pending = PICK_CELL is not None
+    if pick_pending:
+        known.goals = [tuple(PICK_CELL)]
+        if tuple(PICK_CELL) != tuple(START_CELL):
+            print("\n[PLAN] เฟส 1 ไปหยิบของที่ช่อง {0} แล้วค่อยไปเป้าหมาย {1}"
+                  .format(tuple(PICK_CELL), GOAL_CELLS))
+
     for step in range(MAX_STEPS):
+        if (x, y) in known.goals and pick_pending:
+            print("\n[PICK] หยิบของที่ช่อง {0} หลังเดินมา {1} ช่อง (จำลอง)"
+                  .format((x, y), len(path) - 1))
+            known.goals = list(GOAL_CELLS)
+            pick_pending = False
+            print("[PLAN] มุ่งหน้าไปเป้าหมาย {0}".format(known.goals))
+            continue
+
         if (x, y) in known.goals:
-            print("\n[GOAL] ถึงเป้าหมายใน {0} ก้าว".format(step))
+            print("\n[GOAL] ถึงเป้าหมายใน {0} ช่อง".format(len(path) - 1))
             print("เส้นทางที่เดินจริง: {0}".format(
                 " -> ".join(str(cell) for cell in path)))
             print("\nแผนที่ที่หุ่นสร้างได้:")
@@ -1810,6 +2063,9 @@ def main():
                         help="วิธีเชื่อมต่อหุ่น (ค่าเริ่มต้น {0})".format(CONN_TYPE))
     parser.add_argument("--no-payload", action="store_true",
                         help="ข้ามการคีบและวางวัตถุ ใช้ตอนดีบักเฉพาะการเดิน")
+    parser.add_argument("--armtest", action="store_true",
+                        help="ยื่นแขนหยิบของตรงหน้า ใช้จูน ARM_PICK_XY "
+                             "หุ่นจะไม่เดินไปไหน")
     args = parser.parse_args()
 
     if args.sim:
@@ -1820,7 +2076,8 @@ def main():
         print("        ติดตั้ง SDK ก่อน หรือใช้ --sim เพื่อทดสอบเฉพาะตรรกะ")
         return 1
 
-    if not args.calib:
+    # --armtest ใช้แค่ ToF กับแขน ไม่ได้อ่าน Sharp/IR จึงไม่ต้องบังคับคาลิเบรต
+    if not args.calib and not args.armtest:
         require_calibration()
 
     ep_robot = robot.Robot()
@@ -1835,6 +2092,10 @@ def main():
         if args.calib:
             run_calibration(hub)
             success = True
+        elif args.armtest:
+            payload = Payload(ep_robot.robotic_arm, ep_robot.gripper)
+            payload.start()
+            success = run_arm_test(hub, payload)
         else:
             # initialize() ตั้ง FREE ให้อยู่แล้ว (robot.py reset) แต่สั่งซ้ำให้ชัดเจน
             # ว่าโค้ดนี้ต้องการให้แชสซีขยับอิสระจากกิมบอล
@@ -1860,9 +2121,10 @@ def main():
         except Exception as exc:                        # noqa: BLE001
             print("[WARN] สั่งหยุดล้อไม่สำเร็จ: {0}".format(exc))
         if payload is not None:
-            # จบแบบไม่ถึงเป้าหมาย (error / Ctrl-C) place() ไม่ได้ถูกเรียก วัตถุ
-            # จะค้างอยู่ในกริปเปอร์และมอเตอร์บีบค้างไว้ ต้องปล่อยเองตรงนี้
-            payload.release_if_holding()
+            # จบแบบไม่ถึงเป้าหมาย (เซนเซอร์หลุด / ไปต่อไม่ได้ / Ctrl-C) place()
+            # ไม่ได้ถูกเรียก วัตถุจะค้างอยู่ในกริปเปอร์ ต้องก้มวางลงเองตรงนี้
+            # ทำหลังสั่งหยุดล้อแล้ว เพื่อให้หุ่นนิ่งก่อนขยับแขน
+            payload.put_down_if_holding()
             payload.stop()
         hub.stop()
         try:
