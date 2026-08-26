@@ -323,6 +323,10 @@ class TruthWorld(object):
                                tc._edge_direction(cell_a, cell_b), True)
         self.xy = tuple(tc.START_CELL)
         self.heading = tc.START_HEADING
+        #: list: ทุกช่องที่หุ่นเดินผ่าน เรียงตามลำดับ เริ่มด้วยช่องเริ่มต้น
+        #: ใช้ตรวจ "เส้นทางที่เดินจริง" ซึ่งเป็นสิ่งเดียวที่บอกได้ว่าขากลับ
+        #: เลี่ยงของที่วางไว้จริงไหม แผนที่ภายในของ run_search มองจากข้างนอกไม่ได้
+        self.path = [self.xy]
 
     def walls_here(self):
         """กำแพงหน้า/ซ้าย/ขวา ที่ตำแหน่งและทิศปัจจุบัน
@@ -401,6 +405,7 @@ class TruthDriver(object):
         if self.world.maze.has_wall(x, y, heading):
             return False, 0.0, "wall"
         self.world.xy = (x + tc.DX[heading], y + tc.DY[heading])
+        self.world.path.append(self.world.xy)
         return True, tc.CELL_SIZE_M, "ok"
 
     def backup(self, distance_m, heading):

@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import test_align                                       # noqa: E402
+import test_maze                                        # noqa: E402
 import test_payload                                     # noqa: E402
 import test_run_search                                  # noqa: E402
 from fakes import Checker                               # noqa: E402
@@ -19,6 +20,7 @@ from fakes import Checker                               # noqa: E402
 #: list: โมดูลเทสต์ตามลำดับที่ควรรัน จากหน่วยย่อยไปหาการรันทั้งรอบ
 SUITES = [
     ("Payload และ --armtest", test_payload),
+    ("Maze: กำแพง ของที่วาง และการวางแผน", test_maze),
     ("การจัดระยะเทียบกำแพงและการเล็งเป้า", test_align),
     ("run_search และ run_sim", test_run_search),
 ]

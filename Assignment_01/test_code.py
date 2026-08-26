@@ -6,11 +6,17 @@
 วัตถุไว้ วางลงเมื่อถึงช่องเป้าหมาย แล้วเดินกลับไปที่ ``RETURN_CELL`` (ค่าเริ่มต้น
 คือช่องเริ่มต้น) เป็นอันจบงาน
 
-ขากลับใช้ตรรกะชุดเดียวกับขาไปทุกอย่าง คือ Flood Fill บนแผนที่ก้อนเดิมที่สะสมมา
-ตลอดขาไป แค่เปลี่ยนช่องเป้าหมายเท่านั้น จึงยังเป็น search run ที่อ่านเซนเซอร์และ
-เติมแผนที่ต่อไปเรื่อย ๆ ไม่ใช่ speed run ที่วิ่งตามเส้นทางที่จำไว้ตอนขาไป ผลคือ
-ขากลับอาจไม่ซ้ำทางเดิม เพราะ Flood Fill ถือว่าด้านที่ยังไม่เคยเห็นเป็นทางเปิด
-ไว้ก่อน จึงเลือกทางที่สั้นกว่าถ้ามันดูเป็นไปได้ แล้วค่อยแก้เอาหน้างานถ้าตัน
+ขากลับใช้ลูปเดียวกับขาไป คือ Flood Fill บนแผนที่ก้อนเดิมที่สะสมมาตลอดขาไป แค่
+เปลี่ยนช่องเป้าหมายเท่านั้น จึงยังเป็น search run ที่อ่านเซนเซอร์และเติมแผนที่ต่อ
+ไปเรื่อย ๆ ไม่ใช่ speed run ที่วิ่งตามเส้นทางที่จำไว้ตอนขาไป แต่กติกาการวางแผน
+ต่างจากขาไปสองข้อ เพราะขากลับไม่มีอะไรให้ค้นพบแล้ว มีแต่ความเสี่ยงให้เลี่ยง
+
+1. ของที่เพิ่งวางถูกจดลงแผนที่เป็นสิ่งกีดขวางทันทีที่ปล่อยมือ (``mark_object``)
+   ไม่ใช่รอให้เซนเซอร์เจอ เพราะ ToF กับ Sharp ติดอยู่ระดับกำแพง ส่วนของกองอยู่
+   กับพื้น เซนเซอร์จึงมองไม่เห็น แต่หุ่นรู้เองอยู่แล้วว่ายื่นแขนไปวางทางไหน
+2. ขากลับเดินเฉพาะด้านที่ตรวจแล้วว่าโล่งจริง ไม่เดาว่าด้านที่ยังไม่เคยเห็นเปิด
+   (``RETURN_KNOWN_ONLY``) ซึ่งครอบคลุมทุกขอบที่เดินผ่านมาเองอยู่แล้ว ทางกลับ
+   จึงมีอย่างน้อยเท่ากับเส้นทางขาไป และลัดได้ถ้าเคยเห็นช่องเปิดด้านข้างระหว่างทาง
 
 การได้วัตถุมาคีบคุมด้วยสองค่าที่ไม่เกี่ยวกัน ไม่ใช่ "โหมด" ที่ผูกกันเป็นชุด
 - ``PICK_CELL``   หยิบที่ช่องไหน (ค่าเริ่มต้น ``START_CELL`` คือหยิบตรงจุดเริ่ม)
@@ -104,6 +110,33 @@ GOAL_CELLS = [(4, 4)]           # รองรับหลายช่อง เ
 # ติดตัวไปทุกช่องเท่า ๆ กัน (advance_one_cell นับ odometry เป็นช่วง ไม่ใช่พิกัด
 # สัมบูรณ์) จึงไม่สะสมขึ้นเรื่อย ๆ และหายไปเองในช่องแรกที่ ToF เบรกให้ที่กำแพง
 RETURN_CELL = START_CELL
+
+# ของที่เพิ่งวางกองอยู่บนพื้นในทิศที่ยื่นแขนวาง ซึ่งเป็นสิ่งกีดขวางที่เซนเซอร์
+# มองไม่เห็น - ToF กับ Sharp ติดอยู่ในระดับกำแพง ส่วนวัตถุเตี้ยกว่านั้นมาก
+# หุ่นจึงต้องจดเองว่าวางไว้ตรงไหน ไม่ใช่รอให้เซนเซอร์เจอ ไม่งั้นขากลับที่ Flood
+# Fill เลือกให้จะพาไปเดินทับของตัวเอง (ทิศที่วางกับทิศที่สั้นที่สุดกลับบ้านมักจะ
+# เป็นทิศเดียวกัน เพราะการวางของเล็งให้ห่างกำแพงมากที่สุด = เล็งเข้ากลางสนาม)
+#
+# True  = กันทั้ง "ขอบที่ยื่นแขนข้ามไป" และ "ช่องถัดไปทางนั้น" ค่าเริ่มต้น เพราะ
+#         ARM_PLACE_XY ยื่นไป 220 mm จากฐานแขน บวกกับตัวหุ่นแล้วของไปตกคร่อม
+#         เส้นแบ่งช่องพอดี (ครึ่งช่อง = 300 mm) การกันแค่ขอบจึงไม่พอ หุ่นยังอ้อม
+#         ไปเข้าช่องนั้นทางด้านอื่นแล้วเบียดของอยู่ดี
+# False = กันแค่ขอบที่ยื่นแขนข้ามไป ใช้เมื่อยื่นแขนสั้นจนของอยู่ในช่องแน่ ๆ
+PLACED_OBJECT_BLOCKS_NEXT_CELL = True
+
+# ขากลับให้เดินเฉพาะด้านที่ "ตรวจแล้วว่าโล่งจริง" เท่านั้นหรือไม่
+#
+# ขาไป Flood Fill ถือว่าด้านที่ยังไม่เคยเห็นเป็นทางเปิดไว้ก่อน ซึ่งถูกแล้วเพราะ
+# หน้าที่ของขาไปคือสำรวจ เจอกำแพงก็มาร์กแล้วหาทางใหม่ แต่ขากลับไม่มีอะไรให้
+# ค้นพบอีกแล้ว มีแต่ของที่เพิ่งวางไว้ให้ระวัง การเดาว่าเปิดจึงมีแต่เสีย
+#
+# True  = ขากลับใช้เฉพาะขอบที่ observe() ยืนยันแล้ว ซึ่งรวมทุกขอบที่หุ่นเดินผ่าน
+#         มาเอง (ก่อนข้ามขอบไหน หุ่นมองเห็นมันเป็นด้านหน้ามาแล้วเสมอ) ทางกลับ
+#         จึงมีอย่างน้อยเท่ากับเส้นทางขาไป และลัดได้ถ้าเคยเห็นช่องเปิดด้านข้าง
+#         ระหว่างทาง ถ้าความรู้ที่มีกลับไม่ถึงจริง ๆ จะถอยไปใช้แบบเดาว่าเปิด
+#         อัตโนมัติ พร้อมพิมพ์บอก
+# False = ขากลับใช้ตรรกะเดียวกับขาไปทุกอย่าง (พฤติกรรมก่อนมีฟีเจอร์นี้)
+RETURN_KNOWN_ONLY = True
 
 # ---------- การต่อสายเซนเซอร์ ----------
 TOF_INDEX = 0                   # sub_distance คืน list 4 ตัว ใช้ตัวไหนเป็นด้านหน้า
@@ -230,9 +263,11 @@ GOAL_WALL_CLEARANCE_MM = 400
 # ตะวันตกของห้องด้านละ 400 mm
 AIM_SEQUENCE = [
     (2, 560),       # หันใต้ วัดกำแพงล่างของห้อง (กำแพงเหนือเป็นประตู มองไม่เห็น)
-    (3, None),      # หันตะวันตกแล้ววางเลย ตำแหน่งตะวันออก-ตะวันตกที่ได้มาตอนเดิน
-                    # เข้าช่องตรงเป้าอยู่แล้ว เพราะ Sharp ประคองเทียบกำแพงข้าง
-                    # ถ้าวัดแล้วเยื้อง ให้ใส่ระยะ ToF เทียบกำแพงตะวันตกแทน None
+    (3, 650),       # หันตะวันตก วัดกำแพงตะวันตกของห้อง แล้ววางจากตรงที่จอด
+                    # คุมแกนตะวันออก-ตะวันตกด้วย ToF เหมือนกัน ไม่ปล่อยให้เป็น
+                    # ตำแหน่งที่ Sharp ประคองไว้ตอนเดินเข้าช่อง เพราะ Sharp บอก
+                    # ได้แค่ "ชิดกว่าหรือห่างกว่ากลางช่อง" ไม่ใช่ระยะจริงเป็น
+                    # มิลลิเมตร ใส่ None แทนได้ถ้าวัดแล้วพบว่ากลางช่องตรงเป้าอยู่แล้ว
 ]
 # ขยับได้ไกลสุดต่อหนึ่งขั้น กันความเสียหายเมื่อ ToF เพี้ยน
 #
@@ -243,7 +278,12 @@ AIM_SEQUENCE = [
 # หาค่าต่ำสุดที่ต้องใช้: หุ่นเข้าช่องเป้าหมายมาโดย ToF เบรกให้ที่ FRONT_STOP_MM
 # ขั้นแรกของ AIM_SEQUENCE จึงต้องขยับ |เป้าขั้นแรก - FRONT_STOP_MM| ส่วนขั้นถัด ๆ
 # ไปที่วัดกำแพงคนละด้านกันก็คิดแบบเดียวกันจากค่าที่ขั้นก่อนหน้าทิ้งไว้
-#   ค่าปัจจุบัน: |560 - 95| = 465 mm -> ต้องไม่ต่ำกว่า 0.465
+#   ค่าปัจจุบัน ขั้นที่ 1: |560 - 95| = 465 mm
+#              ขั้นที่ 2: พอหันตะวันตก ToF อ่านกำแพงตะวันตกของห้องได้ราวหนึ่ง
+#                        ช่องครึ่ง (~900 mm) จึงขยับราว |650 - 900| = 250 mm
+#              -> ตัวที่กำหนดเพดานคือขั้นที่ 1 ต้องไม่ต่ำกว่า 0.465
+# ตัวเลข ~900 เป็นการประมาณจากเรขาคณิตของช่อง ไม่ใช่ค่าที่วัดมา ถ้าขั้นไหนจบด้วย
+# [WARN] budget แปลว่าประมาณต่ำไป ให้ดูระยะจริงจากบรรทัด [AIM] แล้วขยับเพดานตาม
 #
 # เพดานบนคือ CELL_SIZE_M เพราะหุ่นถอยไกลกว่าหนึ่งช่องไม่ได้อยู่แล้ว - พื้นที่ที่
 # ยืนยันแล้วว่าโล่งมีแค่ช่องที่เพิ่งเดินผ่านมาเมื่อกี้ ที่ 0.50 จึงยังกันพลาดได้อยู่
@@ -750,6 +790,13 @@ class Maze(object):
         self.goals = [tuple(g) for g in goals]
         self.walls = [[0] * height for _ in range(width)]
         self.known = [[0] * height for _ in range(width)]
+        #: set: {(x, y, direction)} ขอบที่มีของวางขวางอยู่ เก็บแยกจาก walls
+        #: เพราะไม่ใช่กำแพงของสนาม เป็นของที่หุ่นเอาไปวางเองแล้วต้องหลบ แยกไว้
+        #: แล้วแผนที่ที่ render ออกมายังตรงกับสนามจริง และการที่ Sharp อ่านด้าน
+        #: นั้นว่า "โล่ง" ในภายหลังก็ลบของทิ้งไม่ได้
+        self.objects = set()
+        #: set: {(x, y)} ช่องที่มีของกองอยู่ ห้ามวางแผนเดินเข้าไปทั้งช่อง
+        self.blocked = set()
         self._add_borders()
 
     def _add_borders(self):
@@ -794,6 +841,49 @@ class Maze(object):
                 self.walls[nx][ny] |= (1 << opposite)
             self.known[nx][ny] |= (1 << opposite)
 
+    def mark_object(self, x, y, direction, block_cell=True):
+        """จดว่ามีของวางอยู่ทางทิศ direction ของช่อง (x, y) แล้วกันไม่ให้เดินทับ
+
+        เรียกตอนที่หุ่นเพิ่งปล่อยของลงพื้นเอง ซึ่งเป็นจังหวะเดียวที่รู้ตำแหน่งของ
+        แน่นอนโดยไม่ต้องพึ่งเซนเซอร์ - แขนยื่นไปทางไหน ของก็อยู่ทางนั้น
+
+        Args:
+            x (int): ช่องที่หุ่นยืนตอนวาง
+            y (int): ช่องที่หุ่นยืนตอนวาง
+            direction (int): ทิศที่ยื่นแขนวาง
+            block_cell (bool): True = กันช่องถัดไปทางนั้นทั้งช่องด้วย ไม่ใช่แค่
+                ขอบ ใช้เมื่อระยะที่แขนยื่นทำให้ของไปตกคร่อมเส้นแบ่งช่อง
+        """
+        if not self.in_bounds(x, y):
+            return
+        self.objects.add((x, y, direction))
+        nx, ny = x + DX[direction], y + DY[direction]
+        if self.in_bounds(nx, ny):
+            # จดขอบเดียวกันจากฝั่งช่องข้างเคียงด้วย ของชิ้นเดียวขวางทั้งสองทาง
+            self.objects.add((nx, ny, (direction + 2) % 4))
+            if block_cell:
+                self.blocked.add((nx, ny))
+
+    def passable(self, x, y, direction, known_only=False):
+        """bool: วางแผนเดินออกจากช่อง (x, y) ไปทางทิศนี้ได้ไหม
+
+        รวมทุกเหตุผลที่ห้ามเดินไว้ที่เดียว ทั้ง :meth:`flood` และ
+        :meth:`choose_next_heading` ต้องถามผ่านตัวนี้เท่านั้น ไม่งั้นสองอันจะ
+        ตอบไม่ตรงกันแล้วหุ่นจะเลือกทิศที่ Flood Fill ไม่เคยคิดว่าจะเดินไป
+
+        Args:
+            known_only (bool): True = ด้านที่ยังไม่เคยตรวจถือว่าเดินไม่ได้
+                (ใช้ตอนขากลับ ที่ไม่มีอะไรให้สำรวจแล้ว) False = ถือว่าเปิดไว้ก่อน
+                ตามหลัก micromouse (ใช้ตอนขาไป)
+        """
+        if self.has_wall(x, y, direction):
+            return False
+        if (x, y, direction) in self.objects:
+            return False
+        if known_only and not self.is_known(x, y, direction):
+            return False
+        return True
+
     def observe(self, x, y, heading, front, left, right):
         """บันทึกผลการตรวจกำแพงจากท่ายืนปัจจุบันลงแผนที่
 
@@ -804,8 +894,12 @@ class Maze(object):
         self.set_wall(x, y, (heading + 1) % 4, right)
         self.set_wall(x, y, (heading + 3) % 4, left)
 
-    def flood(self):
+    def flood(self, known_only=False):
         """คำนวณระยะจากทุกช่องไปยังเป้าหมายที่ใกล้ที่สุด ด้วย BFS ย้อนจากเป้าหมาย
+
+        Args:
+            known_only (bool): ส่งต่อให้ :meth:`passable` True = นับเฉพาะด้านที่
+                ตรวจแล้วว่าโล่งจริง ไม่เดาว่าด้านที่ยังไม่เคยเห็นเป็นทางเปิด
 
         Returns:
             list: ตาราง distance[x][y] ค่า INF แปลว่าไปไม่ถึงด้วยความรู้ปัจจุบัน
@@ -813,7 +907,7 @@ class Maze(object):
         dist = [[INF] * self.height for _ in range(self.width)]
         queue = deque()
         for gx, gy in self.goals:
-            if self.in_bounds(gx, gy):
+            if self.in_bounds(gx, gy) and (gx, gy) not in self.blocked:
                 dist[gx][gy] = 0
                 queue.append((gx, gy))
 
@@ -821,20 +915,27 @@ class Maze(object):
             cx, cy = queue.popleft()
             next_dist = dist[cx][cy] + 1
             for direction in range(4):
-                if self.has_wall(cx, cy, direction):
+                if not self.passable(cx, cy, direction, known_only):
                     continue
                 nx, ny = cx + DX[direction], cy + DY[direction]
-                if self.in_bounds(nx, ny) and dist[nx][ny] > next_dist:
+                if not self.in_bounds(nx, ny) or (nx, ny) in self.blocked:
+                    continue
+                if dist[nx][ny] > next_dist:
                     dist[nx][ny] = next_dist
                     queue.append((nx, ny))
         return dist
 
-    def choose_next_heading(self, x, y, heading, dist):
+    def choose_next_heading(self, x, y, heading, dist, known_only=False):
         """เลือกทิศถัดไปที่ควรเดิน
 
         ไล่ดูตามลำดับ ตรงไป -> ขวา -> ซ้าย -> หลัง แล้วเทียบ distance ด้วย ``<``
         อย่างเคร่งครัด ผลคือเมื่อหลายทิศมี distance เท่ากันจะได้ทิศที่มาก่อนใน
         ลำดับนี้ ซึ่งทำให้หุ่นชอบเดินตรงมากกว่าหมุน ประหยัดเวลาและลด yaw drift
+
+        Args:
+            known_only (bool): ต้องส่งค่าเดียวกับที่ใช้ตอนเรียก :meth:`flood`
+                ให้ได้ ``dist`` มา ไม่งั้นจะเลือกทิศที่ตาราง distance คิดมาจาก
+                กติกาคนละชุด
 
         Returns:
             int or None: ทิศที่เลือก หรือ None เมื่อไม่มีทางออกเลย
@@ -843,7 +944,7 @@ class Maze(object):
         best_dir = None
         best_dist = INF
         for direction in order:
-            if self.has_wall(x, y, direction):
+            if not self.passable(x, y, direction, known_only):
                 continue
             nx, ny = x + DX[direction], y + DY[direction]
             if not self.in_bounds(nx, ny):
@@ -875,9 +976,11 @@ class Maze(object):
         return seen, total
 
     def _edge_glyph(self, x, y, direction, horizontal):
-        """str: สัญลักษณ์ของขอบหนึ่งด้าน แยกกำแพง / โล่งที่ยืนยันแล้ว / ยังไม่เคยดู"""
+        """str: สัญลักษณ์ของขอบหนึ่งด้าน แยกกำแพง / ของที่วาง / โล่ง / ยังไม่เคยดู"""
         if self.has_wall(x, y, direction):
             return "---" if horizontal else "|"
+        if (x, y, direction) in self.objects:
+            return "ooo" if horizontal else "o"
         if self.is_known(x, y, direction):
             return "   " if horizontal else " "
         return " . " if horizontal else ":"
@@ -908,6 +1011,8 @@ class Maze(object):
             for x in range(self.width):
                 if robot is not None and (robot[0], robot[1]) == (x, y):
                     cell = " {0} ".format(DIR_ARROWS[robot[2]])
+                elif (x, y) in self.blocked:
+                    cell = " o "
                 elif (x, y) in self.goals:
                     cell = " G "
                 elif dist is not None:
@@ -926,6 +1031,8 @@ class Maze(object):
             seen, total = self.edge_stats()
             lines.append("--- = กำแพง | ว่าง = ตรวจแล้วโล่ง | . = ยังไม่เคยตรวจ"
                          "   (สำรวจแล้ว {0}/{1} ด้าน)".format(seen, total))
+            if self.objects:
+                lines.append("o = ของที่วางไว้เอง ไม่ใช่กำแพง แต่ห้ามเดินทับ")
         return "\n".join(lines)
 
 
@@ -1782,6 +1889,22 @@ def place_on_target(driver, payload, heading, room_behind_m):
     return heading
 
 
+def place_heading_for(entry_heading):
+    """ทิศที่แขนจะยื่นวางของ เมื่อเข้าช่องเป้าหมายมาด้วยทิศ ``entry_heading``
+
+    คำนวณจาก ``AIM_SEQUENCE`` ล้วน ๆ โดยไม่ต้องขยับหุ่น มีไว้ให้ ``run_sim``
+    (และเทสต์) รู้ล่วงหน้าว่าของจะไปกองทางไหน ตัว ``run_search`` ไม่ใช้ เพราะมัน
+    ได้ทิศจริงจากค่าที่ :func:`place_on_target` คืนมาอยู่แล้ว ซึ่งเชื่อถือได้กว่า
+
+    Returns:
+        int: ทิศที่หุ่นจะหันอยู่ตอนปล่อยของ = ทิศที่ของไปกองอยู่
+    """
+    for face, _ in AIM_SEQUENCE:
+        if face is not None:
+            entry_heading = face
+    return entry_heading
+
+
 def face_way_back(driver, heading, entry_heading):
     """หันกลับไปทางด้านที่เพิ่งเดินเข้าช่องเป้าหมายมา ก่อนออกเดินขากลับ
 
@@ -1795,9 +1918,9 @@ def face_way_back(driver, heading, entry_heading):
        มาเองเมื่อกี้ ไม่ใช่ด้านที่แผนที่แค่ "ยังไม่เคยเห็น" แล้วเดาว่าเปิด
 
     ข้อควรรู้: ถ้าตั้งให้ขั้นสุดท้ายของ ``AIM_SEQUENCE`` หันไปทางเดียวกับด้านที่
-    เดินเข้าห้องมา ของที่วางจะไปกองขวางทางกลับพอดี กรณีนั้นด่าน ToF ก่อนออกตัว
-    จะเห็นแล้วมาร์กเป็นกำแพง ทำให้ขากลับต้องหาทางอื่น หรือจบด้วย [FAIL] ถ้าไม่มี
-    ทางอื่นให้ไป
+    เดินเข้าห้องมา ของที่วางจะไปกองขวางทางกลับพอดี กรณีนั้นหุ่นหันหลังให้ของแล้ว
+    เจอของขวางทางที่เพิ่งเดินมา ซึ่ง ``Maze.mark_object`` จดไว้ให้แล้วตั้งแต่ตอน
+    ปล่อยมือ ขากลับจึงต้องหาทางอื่น หรือจบด้วย [FAIL] ถ้าไม่มีทางอื่นให้ไป
 
     Args:
         driver (Driver): ตัวควบคุมการเคลื่อนที่
@@ -1907,6 +2030,9 @@ def run_search(hub, driver, payload, go_home=True):
                   .format((x, y), moves))
             driver.stop()
             place_pending = False
+            # เคยมีของอยู่ในมือจริงไหม ถ้าคีบไม่ติดมาตั้งแต่ต้น การยื่นแขนวางก็
+            # ไม่มีอะไรหล่นลงพื้น จึงไม่มีสิ่งกีดขวางให้ต้องกันทาง
+            had_object = payload is not None and payload.holding
             if payload is not None:
                 # entry_travel = ระยะที่เพิ่งเดินเข้าช่องนี้มา ซึ่งเป็นพื้นที่
                 # เดียวข้างหลังที่หุ่นเพิ่งผ่านมาเองแล้วว่าโล่งจริง แผนที่บอก
@@ -1921,6 +2047,19 @@ def run_search(hub, driver, payload, go_home=True):
             if arm_stuck_out:
                 print("[WARN] ปล่อยวัตถุไม่ออก แขนยังยื่นค้างอยู่ที่ท่าวาง "
                       "จึงไม่เดินกลับ ให้เอาวัตถุออกจากมือก่อน")
+
+            # ของหลุดมือลงพื้นแล้ว = มีสิ่งกีดขวางเพิ่มมาหนึ่งชิ้นในทิศที่เพิ่ง
+            # ยื่นแขนไป จดตอนนี้เลยเพราะเป็นจังหวะเดียวที่รู้ตำแหน่งมันแน่นอน
+            # ไม่ต้องรอให้ ToF หรือ Sharp เจอ ซึ่งมันไม่เจออยู่แล้วเพราะทั้งคู่
+            # ติดอยู่ในระดับกำแพง ส่วนของกองอยู่กับพื้น
+            if had_object and not arm_stuck_out:
+                maze.mark_object(x, y, heading,
+                                 block_cell=PLACED_OBJECT_BLOCKS_NEXT_CELL)
+                print("[MAP] ของอยู่ทาง {0} ของช่อง {1} กันไม่ให้ขากลับเดินทับ{2}"
+                      .format(DIR_NAMES[heading], (x, y),
+                              " (กันทั้งช่อง {0})".format(
+                                  (x + DX[heading], y + DY[heading]))
+                              if PLACED_OBJECT_BLOCKS_NEXT_CELL else ""))
 
             if return_cell is not None and not arm_stuck_out:
                 maze.goals = [return_cell]
@@ -1959,7 +2098,18 @@ def run_search(hub, driver, payload, go_home=True):
               .format(front, left, right))
 
         maze.observe(x, y, heading, front, left, right)
-        dist = maze.flood()
+
+        # ขากลับไม่เดาว่าด้านที่ยังไม่เคยเห็นเป็นทางเปิด ใช้เฉพาะที่ตรวจแล้ว
+        # ซึ่งครอบคลุมทุกขอบที่เดินผ่านมาแล้วเสมอ ทางกลับจึงมีอยู่แน่ ๆ อย่างน้อย
+        # เท่ากับเส้นทางขาไป ถ้าไม่มีจริง ๆ (แผนที่โดนมาร์กกำแพงผิดระหว่างทาง)
+        # ค่อยยอมเดาเหมือนขาไป ดีกว่ายืนตายอยู่ตรงนั้น
+        known_only = RETURN_KNOWN_ONLY and not place_pending
+        dist = maze.flood(known_only=known_only)
+        if known_only and dist[x][y] >= INF:
+            print("[PLAN] ทางกลับที่ยืนยันแล้วตันหมด - ยอมใช้ด้านที่ยังไม่เคย"
+                  "ตรวจเหมือนขาไป")
+            known_only = False
+            dist = maze.flood()
         print(maze.render(dist=dist, robot=(x, y, heading), legend=True))
 
         if dist[x][y] >= INF:
@@ -1967,9 +2117,13 @@ def run_search(hub, driver, payload, go_home=True):
             print("\n[FAIL] จากความรู้ปัจจุบัน ไป{0}ไม่ได้แล้ว "
                   "(ทุกทางที่รู้จักถูกกำแพงปิดหมด)"
                   .format("เป้าหมาย" if place_pending else "ช่องที่จะกลับไป"))
+            if maze.blocked:
+                print("       ช่องที่กันไว้เพราะมีของวางอยู่: {0}"
+                      .format(sorted(maze.blocked)))
             return False
 
-        next_heading = maze.choose_next_heading(x, y, heading, dist)
+        next_heading = maze.choose_next_heading(x, y, heading, dist,
+                                                known_only=known_only)
         if next_heading is None:
             print("\n[FAIL] ช่องนี้ถูกล้อมทุกด้าน ออกไปไหนไม่ได้")
             return False
@@ -2433,6 +2587,18 @@ def run_sim():
             if place_pending:
                 print("\n[GOAL] ถึงเป้าหมายใน {0} ช่อง".format(len(path) - 1))
                 place_pending = False
+                # จำลองการวางของด้วย เพราะของที่วางเป็นสิ่งกีดขวางที่มีผลกับ
+                # แผนขากลับโดยตรง ถ้าไม่จำลอง แผนที่ตรวจก่อนลงสนามก็ไม่ใช่แผน
+                # เดียวกับที่หุ่นจะเดินจริง
+                place_heading = place_heading_for(heading)
+                known.mark_object(x, y, place_heading,
+                                  block_cell=PLACED_OBJECT_BLOCKS_NEXT_CELL)
+                print("[MAP] วางของทาง {0} ของช่อง {1}"
+                      .format(DIR_NAMES[place_heading], (x, y)))
+                if len(path) > 1:
+                    # face_way_back หันหลังให้ของ = หันไปทางที่เพิ่งเดินเข้ามา
+                    # ถ้ายังไม่เคยเดินเลย ก็ไม่มีด้านไหนที่ยืนยันแล้วให้หันไปหา
+                    heading = (heading + 2) % 4
                 if return_cell is not None:
                     known.goals = [return_cell]
                     print("[PLAN] วางของแล้ว เดินกลับไปที่ช่อง {0}"
@@ -2453,7 +2619,12 @@ def run_sim():
         left = truth.has_wall(x, y, (heading + 3) % 4)
         known.observe(x, y, heading, front, left, right)
 
-        dist = known.flood()
+        known_only = RETURN_KNOWN_ONLY and not place_pending
+        dist = known.flood(known_only=known_only)
+        if known_only and dist[x][y] >= INF:
+            print("[PLAN] ทางกลับที่ยืนยันแล้วตันหมด - ยอมใช้ด้านที่ยังไม่เคยตรวจ")
+            known_only = False
+            dist = known.flood()
         print("\n--- ก้าวที่ {0} | ช่อง ({1}, {2}) | หัน {3} | distance {4} ---"
               .format(step, x, y, DIR_NAMES[heading], dist[x][y]))
         print(known.render(dist=dist, robot=(x, y, heading), legend=True))
@@ -2462,7 +2633,8 @@ def run_sim():
             print("\n[FAIL] ไปเป้าหมายไม่ได้แล้ว")
             return False
 
-        next_heading = known.choose_next_heading(x, y, heading, dist)
+        next_heading = known.choose_next_heading(x, y, heading, dist,
+                                                 known_only=known_only)
         if next_heading is None:
             print("\n[FAIL] ถูกล้อมทุกด้าน")
             return False
@@ -2470,6 +2642,12 @@ def run_sim():
         # ตรวจความถูกต้องของตรรกะ: ทิศที่เลือกต้องไม่มีกำแพงอยู่จริง
         if truth.has_wall(x, y, next_heading):
             print("\n[BUG] เลือกเดินไปทาง {0} ทั้งที่มีกำแพงจริงอยู่"
+                  .format(DIR_NAMES[next_heading]))
+            return False
+
+        # และต้องไม่เดินทับของที่เพิ่งวางไว้เอง
+        if (x, y, next_heading) in known.objects:
+            print("\n[BUG] เลือกเดินไปทาง {0} ทั้งที่วางของขวางไว้ตรงนั้น"
                   .format(DIR_NAMES[next_heading]))
             return False
 

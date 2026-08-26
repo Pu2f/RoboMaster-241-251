@@ -7,7 +7,7 @@ run_search คือโค้ดที่หุ่นจริงรัน ส�
 import inspect
 import sys
 
-from fakes import Checker, load, make_world, quiet
+from fakes import Checker, load, make_payload, make_world, quiet
 
 #: list: กำแพงที่ขังหุ่นไว้กับช่อง (0, 0) และ (0, 1) แยกขาดจากช่องเป้าหมาย
 #:
@@ -15,6 +15,12 @@ from fakes import Checker, load, make_world, quiet
 #: (0, 1) เห็นกำแพงครบทั้งสองด้านที่เหลือ flood ก็คืน INF ที่ช่องของตัวเอง
 #: ซึ่งคือเงื่อนไขของ "[FAIL] จากความรู้ปัจจุบัน ไปเป้าหมายไม่ได้แล้ว"
 SEALED_EDGES = [((0, 0), (1, 0)), ((0, 1), (1, 1)), ((0, 1), (0, 2))]
+
+#: list: กำแพงเพิ่มที่ทำให้ขากลับมีทางเลือกที่ "ดูสั้นกว่า" แต่ยังไม่เคยตรวจ
+#:
+#: ผลคือหุ่นเข้าช่องเป้าหมายทางตะวันตก (ผ่านช่อง (3, 4) ที่จะกลายเป็นที่วางของ)
+#: และมีทางตันที่ (1, 3)-(1, 2) รออยู่บนเส้นทางที่ Flood Fill แบบเดาจะเลือก
+DETOUR_EDGES = [((4, 2), (4, 3)), ((2, 3), (2, 2))]
 
 
 def test_arm_poses_in_range(chk):
@@ -298,7 +304,11 @@ def test_face_way_back(chk):
 
 
 class _StubTurner(object):
-    """driver ที่ทำได้อย่างเดียวคือจดว่าถูกสั่งหันไปทางไหน"""
+    """driver ที่ทำได้อย่างเดียวคือจดว่าถูกสั่งหันไปทางไหน
+
+    รับคำสั่งจัดระยะกับถอยห่างกำแพงไว้ด้วย เพราะ ``place_on_target`` เรียกมัน
+    ระหว่างเล็งเป้า แต่ไม่ต้องขยับอะไร เทสต์ที่ใช้คลาสนี้สนใจแค่ "จบแล้วหันทางไหน"
+    """
 
     def __init__(self):
         self.turns = []
@@ -309,6 +319,189 @@ class _StubTurner(object):
         self.turns.append((current_heading, target_heading))
         self.align_flags.append(align_first)
         return target_heading
+
+    def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None):
+        return target_mm, 0.0, "stop"
+
+    def back_off_from_wall(self, clearance_mm, heading, limit_m):
+        return clearance_mm, 0.0, "clear"
+
+
+def _legs(tc, world):
+    """แยกเส้นทางที่เดินจริงออกเป็นขาไปกับขากลับ ตรงช่องเป้าหมาย
+
+    Returns:
+        tuple: (ขาไปรวมช่องเป้าหมาย, ขากลับเริ่มจากช่องเป้าหมาย)
+    """
+    goal = tuple(tc.GOAL_CELLS[0])
+    cut = world.path.index(goal)
+    return world.path[:cut + 1], world.path[cut:]
+
+
+def test_return_avoids_placed_object(chk):
+    """ขากลับต้องไม่เดินทับของที่เพิ่งวางเอง
+
+    ของที่วางเป็นสิ่งกีดขวางที่เซนเซอร์ตัวไหนก็มองไม่เห็น ToF กับ Sharp ติดอยู่
+    ระดับกำแพงส่วนของกองอยู่กับพื้น หุ่นจึงต้องจดเองตอนปล่อยของ ซึ่งเป็นจังหวะ
+    เดียวที่รู้ตำแหน่งมันแน่นอน
+    """
+    chk.section("ขากลับหลบของที่วางไว้")
+
+    tc = load()
+    goal = tuple(tc.GOAL_CELLS[0])
+    place_dir = tc.place_heading_for(tc.NORTH)           # เข้าช่องเป้าหมายทางเหนือ
+    drop_cell = (goal[0] + tc.DX[place_dir], goal[1] + tc.DY[place_dir])
+
+    # เทสต์นี้จะมีความหมายก็ต่อเมื่อทิศที่วางของคือทิศที่ Flood Fill อยากใช้กลับ
+    # บ้านพอดี ซึ่งเป็นที่มาของบั๊กเดิม ถ้าคอนฟิกเปลี่ยนจนไม่ใช่แล้ว ให้มาแก้
+    # ตรงนี้เพื่อสร้างสถานการณ์เดิมขึ้นมาใหม่ ไม่ใช่ลบข้อนี้ทิ้ง
+    bare = tc.Maze(tc.MAZE_W, tc.MAZE_H, [tuple(tc.RETURN_CELL)])
+    naive = bare.choose_next_heading(goal[0], goal[1], tc.NORTH, bare.flood())
+    chk.check("(ที่มาของบั๊ก) ถ้าไม่จดของ Flood Fill จะเลือกทิศที่วางของพอดี",
+              naive == place_dir)
+
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, out = quiet(tc.run_search, hub, driver, payload)
+    outbound, homeward = _legs(tc, hub.world)
+
+    chk.check("จบครบทุกเฟส", got is True)
+    chk.check("จดของที่วางลงแผนที่", "[MAP] ของอยู่ทาง" in out)
+    chk.check("จดว่ากันทั้งช่อง {0}".format(drop_cell),
+              "กันทั้งช่อง {0}".format(drop_cell) in out)
+    chk.check("ขากลับไม่เดินเข้าช่องที่ของกองอยู่",
+              drop_cell not in homeward)
+    chk.check("ก้าวแรกของขากลับไม่ใช่ทิศที่วางของ",
+              homeward[1] != drop_cell)
+    chk.check("แผนที่ที่พิมพ์ออกมาบอกว่าตรงไหนคือของ",
+              "ของที่วางไว้เอง" in out)
+    chk.check("ยังกลับถึงบ้านตามปกติ", hub.world.xy == tuple(tc.START_CELL))
+    chk.check("ขาไปไม่ถูกกระทบ (จดของหลังวางเสร็จแล้วเท่านั้น)",
+              len(outbound) > 1 and outbound[0] == tuple(tc.START_CELL))
+
+    # ปิดการกันทั้งช่อง ต้องยังกันขอบที่ยื่นแขนข้ามไปอยู่ดี
+    tc = load()
+    tc.PLACED_OBJECT_BLOCKS_NEXT_CELL = False
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, out = quiet(tc.run_search, hub, driver, payload)
+    _, homeward = _legs(tc, hub.world)
+    chk.check("กันแค่ขอบ: ยังจบครบ", got is True)
+    chk.check("กันแค่ขอบ: ไม่พิมพ์ว่ากันทั้งช่อง", "กันทั้งช่อง" not in out)
+    chk.check("กันแค่ขอบ: ก้าวแรกยังไม่ข้ามไปทับของ", homeward[1] != drop_cell)
+
+    # ไม่มี payload = ไม่มีของให้วาง จึงต้องไม่ไปกันทางอะไรทั้งนั้น
+    tc = load()
+    hub, driver, _, _, _ = make_world(tc, tc.START_CELL, None)
+    got, out = quiet(tc.run_search, hub, driver, None)
+    chk.check("--no-payload: ไม่จดของเลย", got is True and "[MAP]" not in out)
+
+    # คีบไม่ติดมาตั้งแต่ต้น = ยื่นแขนวางไปก็ไม่มีอะไรหล่น ห้ามกันทางเปล่า ๆ
+    # เพราะช่องที่กันไว้อาจเป็นทางกลับบ้านทางเดียวที่มี
+    tc = load()
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0),
+                                            gripper_status="closed")
+    got, out = quiet(tc.run_search, hub, driver, payload)
+    chk.check("คีบไม่ติด: (สถานการณ์) ไม่มีของอยู่ในมือจริง",
+              "ไม่ได้คีบวัตถุมาด้วย" in out)
+    chk.check("คีบไม่ติด: ไม่จดของที่ไม่มีอยู่จริง",
+              got is True and "[MAP]" not in out)
+
+
+def test_return_falls_back_when_known_ground_runs_out(chk):
+    """ขากลับที่ยืนยันแล้วไปไม่ถึง ต้องยอมเดาเหมือนขาไป ไม่ใช่ยอมแพ้
+
+    RETURN_CELL ที่ไม่เคยเดินไปแถวนั้นเลยคือเคสที่ความรู้ที่สะสมมาไม่พอจริง ๆ
+    ถ้าไม่มีทางถอย หุ่นจะจอดตายทั้งที่สนามยังเดินได้
+    """
+    chk.section("ขากลับถอยไปใช้แบบเดาเมื่อความรู้ไม่พอ")
+
+    tc = load()
+    tc.RETURN_CELL = (0, 5)                 # มุมที่ขาไปไม่ได้เฉียดไปเลย
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, out = quiet(tc.run_search, hub, driver, payload)
+
+    chk.check("ยังไปถึงช่องที่สั่งให้กลับไป", got is True)
+    chk.check("จอดที่ช่องนั้นจริง", hub.world.xy == (0, 5))
+    chk.check("บอกว่าถอยไปใช้ด้านที่ยังไม่เคยตรวจ",
+              "ทางกลับที่ยืนยันแล้วตันหมด" in out)
+
+    # เส้นทางปกติไม่ควรต้องถอยไปเดา เพราะทางที่เดินมาเองก็เป็นทางกลับอยู่แล้ว
+    tc = load()
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    _, out = quiet(tc.run_search, hub, driver, payload)
+    chk.check("กลับบ้านตามปกติ: ไม่ต้องถอยไปเดาเลย",
+              "ทางกลับที่ยืนยันแล้วตันหมด" not in out)
+
+
+def test_return_prefers_verified_ground(chk):
+    """ขากลับต้องเดินบนพื้นที่ตรวจแล้ว ไม่ใช่พุ่งไปทางที่ "ดูใกล้กว่า"
+
+    เขาวงกตชุดนี้จงใจให้ทางที่ยังไม่เคยตรวจดูสั้นกว่าเสมอ ซึ่งเป็นกับดักของการ
+    มองโลกในแง่ดีของ Flood Fill พอเดินไปจริงถึงรู้ว่าตัน ต้องย้อนออกมา
+
+    และเป็นเคสที่อธิบายว่าทำไมถึงไม่ใช้วิธี "จำทางขาไปแล้วเดินย้อน" ตรง ๆ ด้วย
+    เพราะหุ่นเข้าช่องเป้าหมายมาทางตะวันตก แล้ววางของลงในช่องที่เพิ่งเดินผ่านมา
+    เส้นทางขาไปจึงเป็นเส้นทางที่เดินย้อนไม่ได้ ต้องให้แผนที่เป็นคนตัดสิน
+    """
+    chk.section("ขากลับเดินบนพื้นที่ตรวจแล้ว")
+
+    tc = load()
+    tc.SIM_BLOCKED_EDGES = list(tc.SIM_BLOCKED_EDGES) + DETOUR_EDGES
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, _ = quiet(tc.run_search, hub, driver, payload)
+    outbound, homeward = _legs(tc, hub.world)
+
+    goal = tuple(tc.GOAL_CELLS[0])
+    entry = tc._edge_direction(outbound[-2], goal)
+    place_dir = tc.place_heading_for(entry)
+    drop_cell = (goal[0] + tc.DX[place_dir], goal[1] + tc.DY[place_dir])
+
+    chk.check("จบครบทุกเฟส", got is True)
+    chk.check("(สถานการณ์) ของไปตกในช่องที่ขาไปเดินผ่านมาเอง {0}"
+              .format(drop_cell), drop_cell in outbound)
+    chk.check("จึงเดินย้อนรอยขาไปตรง ๆ ไม่ได้ ต้องเลี่ยงช่องนั้น",
+              drop_cell not in homeward)
+    chk.check("กลับถึงบ้านโดยไม่วนซ้ำช่องเดิมเลย",
+              len(set(homeward)) == len(homeward))
+
+    strict_moves = len(homeward) - 1
+
+    tc = load()
+    tc.RETURN_KNOWN_ONLY = False                        # กลับไปเดาเหมือนขาไป
+    tc.SIM_BLOCKED_EDGES = list(tc.SIM_BLOCKED_EDGES) + DETOUR_EDGES
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, _ = quiet(tc.run_search, hub, driver, payload)
+    _, guessed = _legs(tc, hub.world)
+    guess_moves = len(guessed) - 1
+
+    chk.check("ปิด RETURN_KNOWN_ONLY: ยังกลับถึงบ้านอยู่ดี", got is True)
+    chk.check("ปิดแล้วหลงเข้าทางตันจนต้องย้อนออกมา",
+              len(set(guessed)) < len(guessed))
+    chk.check("เปิดไว้เดินน้อยกว่าชัดเจน ({0} เทียบกับ {1} ช่อง)"
+              .format(strict_moves, guess_moves),
+              strict_moves < guess_moves)
+
+
+def test_place_heading_for_matches_the_real_thing(chk):
+    """place_heading_for ต้องบอกทิศเดียวกับที่ place_on_target หันไปจริง
+
+    run_sim กับเทสต์ใช้ตัวคำนวณ ส่วนหุ่นจริงใช้ค่าที่ place_on_target คืนมา
+    ถ้าสองอย่างนี้ตอบไม่ตรงกัน แผนที่ตรวจก่อนลงสนามจะวางของคนละทิศกับของจริง
+    """
+    chk.section("ทิศที่วางของ: ตัวคำนวณตรงกับของจริง")
+
+    for sequence in ([(2, 560), (3, None)], [(None, None)], [(1, 300)], []):
+        tc = load()
+        tc.AIM_SEQUENCE = sequence
+        for entry in range(4):
+            payload, _, _ = make_payload(tc, {"open": "opened",
+                                              "close": "normal"})
+            quiet(payload.pick_up, None)
+            real, _ = quiet(tc.place_on_target, _StubTurner(), payload,
+                            entry, 0.6)
+            chk.check("AIM {0} เข้าทาง {1}: คำนวณได้ {2} เท่ากับของจริง"
+                      .format(sequence, tc.DIR_NAMES[entry],
+                              tc.DIR_NAMES[real]),
+                      tc.place_heading_for(entry) == real)
 
 
 def test_sim_returns_too(chk):
@@ -438,6 +631,10 @@ def run(chk=None):
     test_no_return_configs(chk)
     test_no_return_when_arm_stuck_out(chk)
     test_face_way_back(chk)
+    test_return_avoids_placed_object(chk)
+    test_return_falls_back_when_known_ground_runs_out(chk)
+    test_return_prefers_verified_ground(chk)
+    test_place_heading_for_matches_the_real_thing(chk)
     test_sim_returns_too(chk)
     test_abort_still_puts_object_down(chk)
     test_main_cleans_up_payload(chk)
