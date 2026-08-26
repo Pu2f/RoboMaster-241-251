@@ -11,6 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import test_backoff                                     # noqa: E402
 import test_payload                                     # noqa: E402
 import test_run_search                                  # noqa: E402
 from fakes import Checker                               # noqa: E402
@@ -18,6 +19,7 @@ from fakes import Checker                               # noqa: E402
 #: list: โมดูลเทสต์ตามลำดับที่ควรรัน จากหน่วยย่อยไปหาการรันทั้งรอบ
 SUITES = [
     ("Payload และ --armtest", test_payload),
+    ("การถอยห่างกำแพงก่อนวางของ", test_backoff),
     ("run_search และ run_sim", test_run_search),
 ]
 

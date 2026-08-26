@@ -206,6 +206,74 @@ class _Snapshot(object):
         return False
 
 
+class Corridor(object):
+    """ทางตรงแกนเดียว ทำหน้าที่เป็นทั้งแชสซีและ SensorHub ให้ ``Driver`` ตัวจริง
+
+    ``TruthWorld`` จำลองแค่ระดับ "ช่อง" ซึ่งหยาบเกินจะทดสอบการถอยทีละไม่กี่
+    เซนติเมตรได้ คลาสนี้จึงจำลองละเอียดกว่า คือตำแหน่งตามแนวเดินเป็นเมตรและ
+    ระยะ ToF ที่ขยับตามกันจริง ๆ เมื่อมีคำสั่ง drive_speed เข้ามา
+
+    Args:
+        tof_mm (int or None): ระยะถึงกำแพงหน้าตอนเริ่ม None = ไม่เห็นกำแพง
+        adc (tuple): (ซ้าย, ขวา) ค่า Sharp ดิบที่ให้ snapshot คืนทุกครั้ง
+        stale (bool): True = ทำเป็นว่าสตรีมเซนเซอร์ขาดการอัปเดต
+        dt (float): เวลาที่ถือว่าผ่านไปต่อหนึ่งคำสั่ง ใช้อินทิเกรตตำแหน่ง
+    """
+
+    def __init__(self, tof_mm, adc=(0, 0), stale=False, dt=0.04):
+        self.start_mm = tof_mm
+        self.adc = adc
+        self.stale = stale
+        self.dt = dt
+        self.pos = 0.0
+        #: list: ทุก (x, y, z) ที่ถูกสั่งออกไป รวมคำสั่งหยุดด้วย
+        self.commands = []
+
+    @property
+    def tof_mm(self):
+        """int or None: ระยะถึงกำแพงหน้า คำนวณจากตำแหน่งปัจจุบันทุกครั้ง
+
+        คำนวณสดจาก ``pos`` แทนการบวกลบสะสม เพื่อไม่ให้การปัดเศษเป็นจำนวนเต็ม
+        ทำให้ระยะที่รายงานค่อย ๆ เพี้ยนออกจากระยะทางที่ขยับจริง
+        """
+        if self.start_mm is None:
+            return None
+        return int(round(self.start_mm - self.pos * 1000))
+
+    # ---------- ฝั่งแชสซี ----------
+    def drive_speed(self, x=0.0, y=0.0, z=0.0, timeout=None):
+        # เดินหน้า = เข้าใกล้กำแพง ระยะถึงกำแพงหน้าจึงลดลงตามที่ขยับ
+        self.commands.append((x, y, z))
+        self.pos += x * self.dt
+
+    # ---------- ฝั่ง SensorHub ----------
+    def snapshot(self):
+        snap = _Snapshot()
+        snap.tof_mm = self.tof_mm
+        snap.pos_x = self.pos
+        snap.adc_left, snap.adc_right = self.adc
+        snap.fresh = not self.stale
+        snap.stale_reason = "tof" if self.stale else ""
+        return snap
+
+    @property
+    def moves(self):
+        """list: เฉพาะคำสั่งที่สั่งให้ขยับจริง ตัดคำสั่งหยุดออก"""
+        return [c for c in self.commands if c != (0.0, 0.0, 0.0)]
+
+
+def make_driver(tc, corridor):
+    """Driver ตัวจริงที่ต่อกับ Corridor ทั้งฝั่งแชสซีและฝั่งเซนเซอร์
+
+    Returns:
+        Driver: ตั้งศูนย์ไว้ที่ทิศเหนือแล้ว พร้อมเรียกเมธอดเคลื่อนที่ได้เลย
+    """
+    driver = tc.Driver(corridor, corridor)
+    driver.yaw_sign = 1
+    driver.yaw_zero = 0.0
+    return driver
+
+
 def make_payload(tc, after=None, arm_fail=False, **kw):
     """สร้าง Payload พร้อมแขนและกริปเปอร์ปลอม แล้ว start() ให้เลย
 
@@ -261,9 +329,25 @@ class TruthDriver(object):
     def __init__(self, world):
         self.world = world
         self.turns = []
+        #: list: อาร์กิวเมนต์ของทุกครั้งที่ run_search สั่งถอยห่างกำแพง
+        self.backoffs = []
 
     def stop(self):
         pass
+
+    def back_off_from_wall(self, clearance_mm, heading, limit_m):
+        """บันทึกว่าถูกสั่งถอย โดยไม่ขยับโลกจำลอง
+
+        TruthWorld รู้แค่ว่าหุ่นอยู่ช่องไหน ไม่มีตำแหน่งย่อยในช่องให้ขยับ
+        การถอยจริงถูกทดสอบแยกด้วย Corridor กับ Driver ตัวจริง
+
+        Returns:
+            tuple: (tof_mm, moved_m, reason) แบบเดียวกับ Driver ตัวจริง
+        """
+        self.backoffs.append((clearance_mm, heading, limit_m))
+        print("[BACKOFF] (จำลอง) ต้องการ {0}mm เพดาน {1:.3f} m"
+              .format(clearance_mm, limit_m))
+        return clearance_mm, 0.0, "clear"
 
     def turn_to(self, current_heading, target_heading):
         if current_heading != target_heading:

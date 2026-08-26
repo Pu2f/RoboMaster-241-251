@@ -102,7 +102,7 @@ SHARP_RIGHT_WALL_ADC = (381, 371)    # (enter, exit)
 SHARP_LEFT_REF = 374     # ค่า ADC ซ้าย ตอนหุ่นอยู่กลางช่องพอดี
 SHARP_RIGHT_REF = 376          # ค่า ADC ขวา ตอนหุ่นอยู่กลางช่องพอดี
 IR_TRIGGERED_VALUE = 0       # ค่า IO ตอนมีสิ่งกีดขวาง (0 หรือ 1)
-FRONT_STOP_MM = 50            # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
+FRONT_STOP_MM = 70            # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
 
 FRONT_WALL_MM_OVERRIDE = None   # ปกติปล่อย None ให้คำนวณจากเรขาคณิตของช่อง
 
@@ -161,6 +161,25 @@ ARM_PLACE_XY = (220, 0)         # ตำแหน่งแขนตอนวา�
 # หันชนกำแพงพอดี ถ้ายื่นสุดแขน 220 mm ของกับนิ้วจะไปกระแทกกำแพงแทนที่จะวางลง
 # พื้น ที่ 110 mm ของยังพ้นล้อหน้าแต่ไม่ชนกำแพงที่ห่าง FRONT_STOP_MM
 ARM_DROP_XY = (110, 0)
+
+# ระยะห่างจากกำแพง "ด้านหน้า" ที่ต้องการก่อนยื่นแขนวางของที่ช่องเป้าหมาย (mm)
+# None = ไม่ต้องถอย ยื่นแขนวางจากตรงที่หุ่นจอดเลย
+#
+# มีไว้เพราะตอนเข้าช่องเป้าหมาย ToF เบรกให้ที่ FRONT_STOP_MM ซึ่งใกล้กำแพงกว่า
+# ระยะที่แขนยื่นออกไป (ARM_PLACE_XY) มาก วางจากตรงนั้นของกับนิ้วจะกระแทกกำแพง
+# แทนที่จะลงพื้น การถอยคือวิธีให้แขนมีที่ยื่นโดยไม่ต้องหดระยะวางให้สั้นลง
+#
+# ข้อจำกัดที่ต้องรู้ก่อนตั้งค่า
+# 1. บังคับได้เฉพาะกำแพงหน้า เพราะมีแต่ ToF ที่คืนค่าเป็นมิลลิเมตรจริง Sharp
+#    ข้างคืนแค่ ADC ดิบที่บอกได้ว่า "มีกำแพงไหม" กับ "ชิดกว่าหรือห่างกว่าจุด
+#    กึ่งกลางช่อง" แปลงเป็นระยะไม่ได้ ด้านข้างจึงทำได้แค่ประคองให้อยู่กลางช่อง
+#    ระหว่างถอย ซึ่งก็คือระยะห่างด้านข้างที่มากที่สุดเท่าที่ช่องกว้างเท่านี้จะให้ได้
+# 2. ในช่องกว้าง CELL_SIZE_M เมตร กำแพงซ้ายขวาห่างกันแค่นั้น ค่าที่เกินครึ่งช่อง
+#    จึงเป็นไปไม่ได้อยู่แล้วสำหรับด้านข้าง ต่อให้หุ่นเป็นจุดเดียว
+# 3. หุ่นถอยได้ไม่เกินระยะที่เพิ่งเดินเข้าช่องนี้มา (พื้นที่ที่ยืนยันแล้วว่าโล่ง)
+#    ถ้าเป้าหมายคือช่องเริ่มต้นที่ไม่ได้เดินมา จะไม่ถอยเลย
+GOAL_WALL_CLEARANCE_MM = 400
+
 GRIPPER_POWER = 50
 GRIPPER_TUCK_POWER = 30         # แรงหุบเบา ๆ ตอนมือเปล่า กันนิ้วเกี่ยวกำแพง
 PAYLOAD_LOAD_S = 2.0            # เวลากางกริปเปอร์ค้างไว้ให้วางวัตถุก่อนหุบคีบ
@@ -1132,6 +1151,82 @@ class Driver(object):
                       "สำเร็จ" if ok else "ไม่สำเร็จ"))
         return ok, traveled, reason
 
+    def back_off_from_wall(self, clearance_mm, heading, limit_m):
+        """ถอยหลังจนกำแพงหน้าห่างอย่างน้อย clearance_mm เพื่อเปิดที่ให้แขนยื่น
+
+        แบ่งหน้าที่เซนเซอร์ตามสิ่งที่มันบอกได้จริง ToF คืนมิลลิเมตรจึงเป็นตัว
+        ตัดสินว่าถอยพอหรือยัง ส่วน Sharp สองข้างคืนแค่ ADC ดิบ แปลงเป็นระยะ
+        ไม่ได้ จึงใช้ทางเดียวที่มันเชื่อถือได้คือประคองให้อยู่กลางช่องระหว่าง
+        ถอย ไม่ให้ไปเบียดกำแพงข้างระหว่างทาง
+
+        Args:
+            clearance_mm: ระยะจาก ToF ถึงกำแพงหน้าที่ต้องการ
+            heading: ทิศที่หุ่นหันอยู่ ใช้ประคอง yaw ระหว่างถอย
+            limit_m: ถอยได้ไกลสุดกี่เมตร 0 = ห้ามถอย
+
+        Returns:
+            tuple: (tof_mm หลังถอย, moved_m, reason)
+        """
+        snap = self.hub.snapshot()
+        if snap.tof_mm is None:
+            print("[BACKOFF] ToF ไม่เห็นกำแพงในระยะวัด ไม่ต้องถอย")
+            return None, 0.0, "no_wall"
+        if snap.tof_mm >= clearance_mm:
+            print("[BACKOFF] กำแพงหน้าห่าง {0}mm อยู่แล้ว (ต้องการ {1}) ไม่ต้องถอย"
+                  .format(snap.tof_mm, clearance_mm))
+            return snap.tof_mm, 0.0, "already_clear"
+        if limit_m <= 0.0:
+            print("[BACKOFF] กำแพงหน้าห่างแค่ {0}mm แต่ถอยไม่ได้ "
+                  "(ไม่มีพื้นที่ข้างหลังที่ยืนยันแล้วว่าโล่ง)".format(snap.tof_mm))
+            return snap.tof_mm, 0.0, "no_room"
+
+        # ถอยเกินที่ต้องการไม่มีประโยชน์ และถอยเกิน limit_m คือถอยเข้าไปในพื้นที่
+        # ที่ยังไม่รู้ว่าโล่งจริงไหม จึงเอาค่าที่น้อยกว่าเป็นงบระยะทาง
+        budget_m = min((clearance_mm - snap.tof_mm) / 1000.0, limit_m)
+        print("[BACKOFF] กำแพงหน้าห่าง {0}mm ต้องการ {1}mm -> ถอยไม่เกิน "
+              "{2:.3f} m (เพดาน {3:.3f} m)"
+              .format(snap.tof_mm, clearance_mm, budget_m, limit_m))
+
+        start_x, start_y = snap.pos_x, snap.pos_y
+        target_yaw = self.heading_yaw(heading)
+        deadline = time.time() + (budget_m / BACKUP_SPEED) * MOVE_TIMEOUT_RATIO + 1.0
+        reason = "timeout"
+
+        while time.time() < deadline:
+            snap = self.hub.snapshot()
+            if not snap.fresh:
+                reason = "sensor_stale:" + snap.stale_reason
+                break
+            if snap.tof_mm is None or snap.tof_mm >= clearance_mm:
+                reason = "clear"
+                break
+            if math.hypot(snap.pos_x - start_x, snap.pos_y - start_y) >= budget_m:
+                reason = "limit"
+                break
+
+            yaw_error = wrap_deg(target_yaw - snap.yaw)
+            turn = 0.0
+            if abs(yaw_error) > YAW_HOLD_DEADBAND_DEG:
+                turn = clamp(KP_YAW_HOLD * yaw_error,
+                             -MAX_YAW_CORRECT_DPS, MAX_YAW_CORRECT_DPS)
+            self._drive(x=-BACKUP_SPEED, y=self._centering_strafe(snap),
+                        z=self.yaw_sign * turn)
+            time.sleep(CONTROL_DT)
+
+        self.stop()
+        time.sleep(0.15)
+
+        snap = self.hub.snapshot()
+        moved = math.hypot(snap.pos_x - start_x, snap.pos_y - start_y)
+        got = "ไกลเกินระยะวัด" if snap.tof_mm is None else "{0}mm".format(snap.tof_mm)
+        print("[BACKOFF] ถอยไป {0:.3f} m กำแพงหน้าห่าง {1} (ต้องการ {2}mm) "
+              "เหตุที่จบ: {3}".format(moved, got, clearance_mm, reason))
+        if reason == "limit":
+            print("[WARN] ถอยจนสุดพื้นที่ที่ปลอดภัยแล้วแต่ยังไม่ได้ระยะที่ตั้งไว้ "
+                  "แขนอาจยังชนกำแพงตอนวาง - ลดค่า GOAL_WALL_CLEARANCE_MM "
+                  "หรือหด x ของ ARM_PLACE_XY ลง")
+        return snap.tof_mm, moved, reason
+
     def backup(self, distance_m, heading):
         """ถอยกลับตามระยะที่กำหนด เพื่อกลับไปยืนกลางช่องเดิมหลังเดินไม่ผ่าน
 
@@ -1495,6 +1590,9 @@ def run_search(hub, driver, payload):
     # ก็ไม่เห็นกำแพง (ล้อลื่น ติดขอบ ฯลฯ) ซึ่งถ้าไม่ตัดจะเลือกทิศเดิมซ้ำไปเรื่อย ๆ
     fail_key = None
     fail_count = 0
+    # ระยะที่เพิ่งเดินเข้าช่องปัจจุบันมาตามทิศที่หันอยู่ตอนนี้ 0 = ไม่รู้ว่าถอย
+    # กลับไปได้แค่ไหน (ยังไม่เคยเดิน หรือหมุนตัวหลังเข้าช่องไปแล้ว)
+    entry_travel = 0.0
     # นับ "ช่องที่เดินผ่านจริง" แยกจากรอบของลูป เพราะรอบที่หยิบของ รอบที่เดินไม่
     # ผ่าน และรอบที่ยกเลิกเพราะ SAFETY ก็กินรอบไปด้วยทั้งที่หุ่นไม่ได้ย้ายช่อง
     moves = 0
@@ -1512,6 +1610,7 @@ def run_search(hub, driver, payload):
             driver.stop()
             if PICK_HEADING is not None:
                 heading = driver.turn_to(heading, PICK_HEADING)
+                entry_travel = 0.0      # หันแล้ว ข้างหลังไม่ใช่ทางที่เพิ่งผ่าน
             if not payload.pick_up(reach_xy=ARM_PICK_XY):
                 print("[WARN] ไม่ได้คีบวัตถุมาด้วย จะเดินต่อแต่ไม่มีของไปวาง")
             maze.goals = list(GOAL_CELLS)
@@ -1524,6 +1623,12 @@ def run_search(hub, driver, payload):
                   .format((x, y), moves))
             driver.stop()
             if payload is not None:
+                if GOAL_WALL_CLEARANCE_MM is not None:
+                    # เพดานการถอยคือระยะที่เพิ่งเดินเข้าช่องนี้มา เพราะนั่นคือ
+                    # พื้นที่เดียวข้างหลังที่หุ่นเพิ่งผ่านมาเองแล้วว่าโล่งจริง
+                    # แผนที่บอกไม่ได้ เพราะ goal ถูกเช็คก่อน observe() ที่ช่องนี้
+                    driver.back_off_from_wall(GOAL_WALL_CLEARANCE_MM, heading,
+                                              entry_travel)
                 payload.place()
             print(maze.render(robot=(x, y, heading), legend=True))
             return True
@@ -1563,6 +1668,9 @@ def run_search(hub, driver, payload):
               .format(dist[x][y], DIR_NAMES[next_heading]))
 
         heading = driver.turn_to(heading, next_heading)
+        # หมุนแล้วข้างหลังไม่ใช่ทางที่เพิ่งผ่านมาอีกต่อไป ล้างเพดานการถอยทิ้ง
+        # แล้วให้ advance_one_cell ที่สำเร็จเป็นตัวตั้งค่าใหม่
+        entry_travel = 0.0
 
         # ตรวจ ToF อีกครั้งหลังหมุนเสร็จ ก่อนออกตัวจริง เป็นด่านสุดท้ายที่กัน
         # ไม่ให้พุ่งชนกำแพง และเป็นตัวแก้ให้อัตโนมัติเมื่อ Sharp อ่านพลาดว่าโล่ง
@@ -1578,6 +1686,7 @@ def run_search(hub, driver, payload):
         if ok:
             x, y = x + DX[heading], y + DY[heading]
             moves += 1
+            entry_travel = traveled
             fail_key = None
             fail_count = 0
         else:
