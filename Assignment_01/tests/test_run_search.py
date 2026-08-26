@@ -184,6 +184,148 @@ def test_abort_still_puts_object_down(chk):
               arm.calls == [tc.ARM_DROP_XY, tc.ARM_CARRY_XY])
 
 
+def test_return_to_start(chk):
+    """วางของเสร็จแล้วต้องเดินกลับไปที่ RETURN_CELL ด้วยแผนที่ก้อนเดิม"""
+    chk.section("เดินกลับหลังวางของ")
+
+    tc = load()
+    hub, driver, payload, arm, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, out = quiet(tc.run_search, hub, driver, payload)
+    chk.check("จบครบทุกเฟส", got is True)
+    chk.check("วางของที่เป้าหมายก่อน", "[GOAL] ถึงช่องเป้าหมาย (4, 4)" in out)
+    chk.check("บอกว่าจะเดินกลับ",
+              "[PLAN] วางของแล้ว เดินกลับไปที่ช่อง (0, 0)" in out)
+    chk.check("กลับถึงช่องเริ่มต้นจริง",
+              "[HOME] กลับถึงช่อง (0, 0)" in out)
+    chk.check("หุ่นจอดอยู่ที่ช่องเริ่มต้นตอนจบ",
+              hub.world.xy == tuple(tc.START_CELL))
+    chk.check("วางของก่อนแล้วค่อยเดินกลับ",
+              out.index("[GOAL]") < out.index("[HOME]"))
+    chk.check("วางของครั้งเดียว ไม่ได้วางซ้ำตอนกลับถึงบ้าน",
+              arm.calls.count(tc.ARM_PLACE_XY) == 1)
+    chk.check("ไม่มีของค้างในมือตอนจบ", payload.holding is False)
+
+    # ขากลับต้องนับต่อจากขาไป ไม่ใช่เริ่มนับใหม่
+    goal_moves = _moves_reported(out)
+    home_moves = None
+    for line in out.split("\n"):
+        if line.startswith("[HOME]"):
+            home_moves = int([w for w in line.split() if w.isdigit()][0])
+    chk.check("รายงานจำนวนช่องรวมทั้งสองขา ({0} -> {1})"
+              .format(goal_moves, home_moves),
+              home_moves is not None and home_moves > goal_moves)
+
+    tc = load()
+    tc.RETURN_CELL = (1, 0)                             # กลับไปช่องอื่นก็ได้
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, out = quiet(tc.run_search, hub, driver, payload)
+    chk.check("RETURN_CELL อื่น: จบครบ", got is True)
+    chk.check("RETURN_CELL อื่น: ไปจอดที่ช่องนั้น", hub.world.xy == (1, 0))
+
+
+def test_no_return_configs(chk):
+    """ปิดการเดินกลับได้ทั้งจากคอนฟิกและจากบรรทัดคำสั่ง"""
+    chk.section("ปิดการเดินกลับ")
+
+    tc = load()
+    tc.RETURN_CELL = None
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, out = quiet(tc.run_search, hub, driver, payload)
+    chk.check("RETURN_CELL = None: ถึงเป้าหมายแล้วจบ", got is True)
+    chk.check("RETURN_CELL = None: ไม่เดินกลับ", "[HOME]" not in out)
+    chk.check("RETURN_CELL = None: จอดค้างที่ช่องเป้าหมาย",
+              hub.world.xy == tuple(tc.GOAL_CELLS[0]))
+
+    tc = load()
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, out = quiet(tc.run_search, hub, driver, payload, go_home=False)
+    chk.check("--no-return: ถึงเป้าหมายแล้วจบ", got is True)
+    chk.check("--no-return: ไม่เดินกลับ", "[HOME]" not in out)
+
+    tc = load()
+    body = inspect.getsource(tc.main)
+    chk.check("main() ต่อสาย --no-return เข้ากับ run_search",
+              "go_home=not args.no_return" in body)
+
+
+def test_no_return_when_arm_stuck_out(chk):
+    """ปล่อยของไม่ออกต้องจบตรงนั้น ไม่ลากแขนที่ยื่นค้างเดินกลับ
+
+    _lower_and_release ตั้งใจคาแขนไว้ที่ท่าวางและกางนิ้วค้างไว้ให้คนหยิบของออก
+    ง่ายที่สุด ท่านั้นคือแขนยื่นสุดและต่ำติดพื้น เดินทั้งท่านั้นคือลากแขนไปครูด
+    กำแพงตลอดทาง
+    """
+    chk.section("ปล่อยของไม่ออกแล้วไม่เดินกลับ")
+
+    tc = load()
+    hub, driver, payload, _, gripper = make_world(tc, tc.START_CELL, (200, 0))
+    gripper.after = {"open": "normal", "close": "normal"}   # กางแล้วยังคาอยู่
+    got, out = quiet(tc.run_search, hub, driver, payload)
+    chk.check("ยังนับว่าถึงเป้าหมาย", got is True)
+    chk.check("เตือนว่าแขนยังยื่นค้าง", "แขนยังยื่นค้างอยู่ที่ท่าวาง" in out)
+    chk.check("ไม่เดินกลับ", "[HOME]" not in out)
+    chk.check("จอดค้างที่ช่องเป้าหมาย",
+              hub.world.xy == tuple(tc.GOAL_CELLS[0]))
+
+
+def test_face_way_back(chk):
+    """ก่อนออกเดินขากลับต้องหันหลังให้ของที่เพิ่งวาง
+
+    ทิศที่หันคือด้านที่เพิ่งเดินเข้าช่องมา ซึ่งเป็นด้านเดียวที่ยืนยันแล้วว่าโล่ง
+    และเป็นด้านตรงข้ามกับของที่กองอยู่ตรงหน้า ถ้าอ่านเซนเซอร์จากท่าวางเลย ToF
+    จะเห็นของเป็นกำแพงแล้วมาร์กลงแผนที่ ซึ่งลบออกไม่ได้
+    """
+    chk.section("หันหลังให้ของที่วางก่อนเดินกลับ")
+
+    tc = load()
+    driver = _StubTurner()
+    got = tc.face_way_back(driver, 3, 2)                # เข้ามาทางใต้ วางทางตะวันตก
+    chk.check("หันกลับไปทางตรงข้ามกับทางที่เดินเข้ามา", got == 0)
+    chk.check("สั่งหันจริงหนึ่งครั้ง", driver.turns == [(3, 0)])
+
+    driver = _StubTurner()
+    got = tc.face_way_back(driver, 1, None)
+    chk.check("ไม่เคยเดินเข้ามา: ไม่หัน", got == 1 and driver.turns == [])
+
+    # เป้าหมายคือช่องที่ยืนอยู่ตั้งแต่แรก จึงไม่มีด้านไหนที่ยืนยันแล้ว
+    tc = load()
+    tc.GOAL_CELLS = [tuple(tc.START_CELL)]
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (200, 0))
+    got, out = quiet(tc.run_search, hub, driver, payload)
+    chk.check("เป้าหมาย = ช่องเริ่มต้น: จบทันทีโดยไม่ต้องเดิน", got is True)
+    chk.check("เป้าหมาย = ช่องเริ่มต้น: ไม่ต้องเดินกลับไปไหน",
+              hub.world.xy == tuple(tc.START_CELL))
+
+
+class _StubTurner(object):
+    """driver ที่ทำได้อย่างเดียวคือจดว่าถูกสั่งหันไปทางไหน"""
+
+    def __init__(self):
+        self.turns = []
+
+    def turn_to(self, current_heading, target_heading):
+        self.turns.append((current_heading, target_heading))
+        return target_heading
+
+
+def test_sim_returns_too(chk):
+    """run_sim ต้องจำลองขากลับด้วย ไม่งั้นตรวจแผนก่อนลงสนามไม่ครบ"""
+    chk.section("run_sim จำลองขากลับ")
+
+    tc = load()
+    got, out = quiet(tc.run_sim)
+    chk.check("จบครบทุกเฟส", got is True)
+    chk.check("มีขากลับ", "[HOME] กลับถึงช่อง (0, 0)" in out)
+    chk.check("เส้นทางที่พิมพ์จบที่ช่องเริ่มต้น",
+              "-> (0, 0)" in out.split("เส้นทางที่เดินจริง:")[-1])
+
+    tc = load()
+    tc.RETURN_CELL = None
+    got, out = quiet(tc.run_sim)
+    chk.check("RETURN_CELL = None: จบที่เป้าหมาย", got is True)
+    chk.check("RETURN_CELL = None: ไม่มีขากลับ", "[HOME]" not in out)
+
+
 def test_main_cleans_up_payload(chk):
     """main() ต้องเรียก put_down_if_holding ใน finally จริง ๆ
 
@@ -289,6 +431,11 @@ def run(chk=None):
     test_fetch_from_another_cell(chk)
     test_turn_before_pick(chk)
     test_degraded_configs(chk)
+    test_return_to_start(chk)
+    test_no_return_configs(chk)
+    test_no_return_when_arm_stuck_out(chk)
+    test_face_way_back(chk)
+    test_sim_returns_too(chk)
     test_abort_still_puts_object_down(chk)
     test_main_cleans_up_payload(chk)
     test_move_counter(chk)

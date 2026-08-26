@@ -234,17 +234,22 @@ def test_aim_sequence_wiring(chk):
     chk.section("เล็งเป้า: run_search เดินตามลำดับ")
 
     tc = load()
+    measured = [s for s in tc.AIM_SEQUENCE if s[1] is not None]
     hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (220, 0))
     got, out = quiet(tc.run_search, hub, driver, payload)
     chk.check("ถึงเป้าหมาย", got is True)
-    chk.check("จัดระยะครบทุกขั้น ({0} ขั้น)".format(len(tc.AIM_SEQUENCE)),
-              len(driver.aligns) == len(tc.AIM_SEQUENCE))
+    chk.check("หันครบทุกขั้นที่กำหนดทิศไว้",
+              len(driver.turns) >= len([s for s in tc.AIM_SEQUENCE
+                                        if s[0] is not None]))
+    chk.check("จัดระยะเฉพาะขั้นที่กำหนดระยะไว้ ({0} จาก {1} ขั้น)"
+              .format(len(measured), len(tc.AIM_SEQUENCE)),
+              len(driver.aligns) == len(measured))
     chk.check("ส่งค่าเป้าตามที่ตั้งไว้",
-              [a[0] for a in driver.aligns] == [s[1] for s in tc.AIM_SEQUENCE])
+              [a[0] for a in driver.aligns] == [s[1] for s in measured])
     chk.check("ส่งงบระยะทางตามที่ตั้งไว้",
               all(a[2] == tc.AIM_MAX_MOVE_M for a in driver.aligns))
     chk.check("จัดระยะในทิศที่กำหนดไว้",
-              [a[1] for a in driver.aligns] == [s[0] for s in tc.AIM_SEQUENCE])
+              [a[1] for a in driver.aligns] == [s[0] for s in measured])
     chk.check("เล็งก่อนวางของ", out.index("[AIM]") < out.index("จุดวางของ"))
     chk.check("ขั้นสุดท้ายหันทิศที่จะยื่นแขนวาง",
               "ขั้นที่ {0}/{0} หัน{1}".format(
@@ -300,6 +305,41 @@ class _StubDriver(object):
         return target_mm, 0.0, self.reason
 
 
+def test_turn_only_step(chk):
+    """ขั้นที่ระยะเป็น None ต้องหันแล้วผ่านไป ไม่แตะล้อ
+
+    ใช้เมื่อวัดแล้วพบว่าตำแหน่งตามแกนนั้นตรงเป้าอยู่แล้วตั้งแต่ตอนเดินเข้าช่อง
+    การจัดระยะซ้ำมีแต่จะดันหุ่นออกจากจุดที่ถูกอยู่แล้ว
+    """
+    chk.section("เล็งเป้า: ขั้นที่หันอย่างเดียว")
+
+    tc = load()
+    tc.AIM_SEQUENCE = [(2, 560), (3, None)]
+    driver = _StubDriver()
+    payload, arm, _ = make_payload(tc, {"open": "opened", "close": "normal"})
+    quiet(payload.pick_up, None)
+    arm.calls = []
+    heading, out = quiet(tc.place_on_target, driver, payload, 0, 0.6)
+
+    chk.check("หันครบสองขั้น", [t[1] for t in driver.turns] == [2, 3])
+    chk.check("จัดระยะแค่ขั้นแรก", [a[0] for a in driver.aligns] == [560])
+    chk.check("บอกว่าขั้นที่สองไม่จัดระยะ", "แล้วไม่จัดระยะ" in out)
+    chk.check("วางของหลังหันไปทิศสุดท้าย", tc.ARM_PLACE_XY in arm.calls)
+    chk.check("คืนทิศสุดท้าย", heading == 3)
+
+    tc = load()
+    tc.AIM_SEQUENCE = [(None, None)]
+    driver = _StubDriver()
+    payload, arm, _ = make_payload(tc, {"open": "opened", "close": "normal"})
+    quiet(payload.pick_up, None)
+    arm.calls = []
+    heading, _ = quiet(tc.place_on_target, driver, payload, 1, 0.6)
+    chk.check("ทิศ None + ระยะ None: ไม่หันไม่จัดระยะ",
+              driver.turns == [] and driver.aligns == [])
+    chk.check("ทิศ None + ระยะ None: ยังวางของ", tc.ARM_PLACE_XY in arm.calls)
+    chk.check("ทิศ None + ระยะ None: คืนทิศเดิม", heading == 1)
+
+
 def test_place_even_when_aim_fails(chk):
     """จัดระยะไม่เข้าเป้าก็ยังต้องวางของ วางเยื้องดีกว่าไม่ได้วางเลย"""
     chk.section("เล็งเป้า: จัดระยะไม่สำเร็จ")
@@ -310,7 +350,9 @@ def test_place_even_when_aim_fails(chk):
     quiet(payload.pick_up, None)
     arm.calls = []
     heading, out = quiet(tc.place_on_target, driver, payload, 0, 0.6)
-    chk.check("ยังเรียกครบทุกขั้น", len(driver.aligns) == len(tc.AIM_SEQUENCE))
+    measured = [s for s in tc.AIM_SEQUENCE if s[1] is not None]
+    chk.check("ยังเรียกครบทุกขั้นที่ต้องจัดระยะ",
+              len(driver.aligns) == len(measured))
     chk.check("ยังวางของ", tc.ARM_PLACE_XY in arm.calls)
     chk.check("ไม่มีของค้างในมือ", payload.holding is False)
     chk.check("คืนทิศสุดท้ายให้ผู้เรียกไปวาดแผนที่ต่อ",
@@ -331,12 +373,18 @@ def test_aim_config_is_usable(chk):
         face, target_mm = step
         chk.check("ขั้น {0}: ทิศ {1} ใช้ได้".format(index, face),
                   face is None or face in range(4))
+        if target_mm is None:
+            chk.check("ขั้น {0}: หันอย่างเดียว ไม่ต้องตรวจระยะ".format(index),
+                      True)
+            continue
         chk.check("ขั้น {0}: เป้า {1}mm ไม่ต่ำกว่าระยะต่ำสุด {2}mm"
                   .format(index, target_mm, tc.FRONT_STOP_MM),
                   target_mm >= tc.FRONT_STOP_MM)
         chk.check("ขั้น {0}: เป้า {1}mm อยู่ในพิสัย ToF ({2}mm)"
                   .format(index, target_mm, tc.TOF_MAX_VALID_MM),
                   target_mm <= tc.TOF_MAX_VALID_MM)
+    chk.check("ทิศของขั้นสุดท้ายกำหนดไว้ชัดเจน หรือรับทิศที่มาถึงโดยตั้งใจ",
+              len(tc.AIM_SEQUENCE) > 0)
     chk.check("งบระยะทางต่อขั้นมากกว่าศูนย์", tc.AIM_MAX_MOVE_M > 0)
 
 
@@ -386,6 +434,7 @@ def run(chk=None):
     test_align_guards(chk)
     test_backup_behaviour_unchanged(chk)
     test_aim_sequence_wiring(chk)
+    test_turn_only_step(chk)
     test_place_even_when_aim_fails(chk)
     test_aim_config_is_usable(chk)
     test_fallback_without_aim(chk)

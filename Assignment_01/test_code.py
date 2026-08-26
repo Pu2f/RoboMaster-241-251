@@ -2,9 +2,15 @@
 
 โหมดการทำงาน
 ------------
-สำรวจเขาวงกตด้วย Flood Fill จากช่องเริ่มต้นจนถึงช่องเป้าหมายแล้วจบ (search run
-อย่างเดียว ไม่มี return run / speed run) ระหว่างทางหุ่นคีบวัตถุไว้ และวางลงเมื่อ
-ถึงช่องเป้าหมาย
+สำรวจเขาวงกตด้วย Flood Fill จากช่องเริ่มต้นไปช่องเป้าหมาย ระหว่างทางหุ่นคีบ
+วัตถุไว้ วางลงเมื่อถึงช่องเป้าหมาย แล้วเดินกลับไปที่ ``RETURN_CELL`` (ค่าเริ่มต้น
+คือช่องเริ่มต้น) เป็นอันจบงาน
+
+ขากลับใช้ตรรกะชุดเดียวกับขาไปทุกอย่าง คือ Flood Fill บนแผนที่ก้อนเดิมที่สะสมมา
+ตลอดขาไป แค่เปลี่ยนช่องเป้าหมายเท่านั้น จึงยังเป็น search run ที่อ่านเซนเซอร์และ
+เติมแผนที่ต่อไปเรื่อย ๆ ไม่ใช่ speed run ที่วิ่งตามเส้นทางที่จำไว้ตอนขาไป ผลคือ
+ขากลับอาจไม่ซ้ำทางเดิม เพราะ Flood Fill ถือว่าด้านที่ยังไม่เคยเห็นเป็นทางเปิด
+ไว้ก่อน จึงเลือกทางที่สั้นกว่าถ้ามันดูเป็นไปได้ แล้วค่อยแก้เอาหน้างานถ้าตัน
 
 การได้วัตถุมาคีบคุมด้วยสองค่าที่ไม่เกี่ยวกัน ไม่ใช่ "โหมด" ที่ผูกกันเป็นชุด
 - ``PICK_CELL``   หยิบที่ช่องไหน (ค่าเริ่มต้น ``START_CELL`` คือหยิบตรงจุดเริ่ม)
@@ -88,6 +94,16 @@ START_HEADING = 0                # 0=North 1=East 2=South 3=West
 # เมื่อจุดวางไม่ได้อยู่กลางช่อง เพราะแขนยื่นตรงไปข้างหน้าอย่างเดียว หุ่นจึงต้อง
 # ยืนถอยออกมาหนึ่งช่องแล้วเอื้อมเข้าไปวาง (ดู AIM_SEQUENCE)
 GOAL_CELLS = [(4, 4)]           # รองรับหลายช่อง เช่นโซนกลาง 2x2 ของ micromouse
+
+# ช่องที่ให้เดินกลับไปหลังวางของเสร็จ None = วางแล้วจบตรงนั้นเลยไม่ต้องเดินกลับ
+# (สั่งชั่วคราวด้วย --no-return ได้โดยไม่ต้องแก้ไฟล์)
+#
+# ขากลับไม่ใช่โค้ดคนละชุด เป็นการตั้ง maze.goals ใหม่แล้วปล่อยให้ลูปเดิมทำงานต่อ
+# บนแผนที่ก้อนเดิม สิ่งที่ต่างจากขาไปมีอย่างเดียวคือหุ่นไม่ได้จอดอยู่กลางช่อง
+# เป๊ะ ๆ ตอนเริ่ม เพราะ AIM_SEQUENCE เพิ่งเลื่อนมันไปเล็งจุดวาง ระยะที่เยื้องนี้
+# ติดตัวไปทุกช่องเท่า ๆ กัน (advance_one_cell นับ odometry เป็นช่วง ไม่ใช่พิกัด
+# สัมบูรณ์) จึงไม่สะสมขึ้นเรื่อย ๆ และหายไปเองในช่องแรกที่ ToF เบรกให้ที่กำแพง
+RETURN_CELL = START_CELL
 
 # ---------- การต่อสายเซนเซอร์ ----------
 TOF_INDEX = 0                   # sub_distance คืน list 4 ตัว ใช้ตัวไหนเป็นด้านหน้า
@@ -190,7 +206,11 @@ GOAL_WALL_CLEARANCE_MM = 400
 # GOAL_WALL_CLEARANCE_MM จะถูกข้ามไปเอง เพราะการเล็งคุมระยะได้ละเอียดกว่า
 #
 # แต่ละขั้นคือ (ทิศที่ต้องหันก่อนวัด, ระยะ ToF ที่ต้องการ หน่วย mm)
-#   ทิศ None = ใช้ทิศที่มาถึงเลย ไม่ต้องหัน
+#   ทิศ None  = ใช้ทิศที่มาถึงเลย ไม่ต้องหัน
+#   ระยะ None = หันอย่างเดียว ไม่จัดระยะ ใช้ตำแหน่งตามแกนนั้นที่ได้มาตอนเดินเข้า
+#               ช่อง ซึ่ง Sharp ประคองไว้เทียบกำแพงข้างระหว่างเดิน ไม่ใช่ odometry
+#               ใช้เมื่อวัดแล้วพบว่าตำแหน่งที่ได้มาเองตรงเป้าอยู่แล้ว การจัดระยะ
+#               ซ้ำมีแต่จะดันหุ่นออกจากจุดที่ถูกอยู่แล้ว
 #   ทิศของขั้นสุดท้ายคือทิศที่ยื่นแขนวาง เพราะแขนยื่นตรงไปข้างหน้าอย่างเดียว
 #   ห้ามใส่ทิศที่ ToF มองไม่เห็นกำแพง (เช่นด้านที่เป็นประตูเข้าห้อง)
 #
@@ -210,7 +230,9 @@ GOAL_WALL_CLEARANCE_MM = 400
 # ตะวันตกของห้องด้านละ 400 mm
 AIM_SEQUENCE = [
     (2, 560),       # หันใต้ วัดกำแพงล่างของห้อง (กำแพงเหนือเป็นประตู มองไม่เห็น)
-    (3, 460),       # หันตะวันตก วัดกำแพงตะวันตก แล้ววางจากทิศนี้
+    (3, None),      # หันตะวันตกแล้ววางเลย ตำแหน่งตะวันออก-ตะวันตกที่ได้มาตอนเดิน
+                    # เข้าช่องตรงเป้าอยู่แล้ว เพราะ Sharp ประคองเทียบกำแพงข้าง
+                    # ถ้าวัดแล้วเยื้อง ให้ใส่ระยะ ToF เทียบกำแพงตะวันตกแทน None
 ]
 AIM_MAX_MOVE_M = 0.35           # ขยับได้ไกลสุดต่อหนึ่งขั้น กันความเสียหายเมื่อ ToF เพี้ยน
 
@@ -1713,6 +1735,13 @@ def place_on_target(driver, payload, heading, room_behind_m):
     for index, (face, target_mm) in enumerate(AIM_SEQUENCE, 1):
         if face is not None:
             heading = driver.turn_to(heading, face)
+        if target_mm is None:
+            # ขั้นที่หันอย่างเดียว ใช้ตำแหน่งตามแกนนี้ที่ได้มาจากตอนเดินเข้าช่อง
+            # ซึ่ง Sharp ประคองไว้เทียบกำแพงข้าง ไม่ใช่ odometry
+            print("[AIM] ขั้นที่ {0}/{1} หัน{2} แล้วไม่จัดระยะ "
+                  "(ใช้ตำแหน่งที่ Sharp ประคองไว้ตอนเข้าช่อง)"
+                  .format(index, len(AIM_SEQUENCE), DIR_NAMES[heading]))
+            continue
         print("[AIM] ขั้นที่ {0}/{1} หัน{2} จัดระยะให้ ToF = {3}mm"
               .format(index, len(AIM_SEQUENCE), DIR_NAMES[heading], target_mm))
         driver.align_to_wall(target_mm, heading, AIM_MAX_MOVE_M)
@@ -1723,24 +1752,72 @@ def place_on_target(driver, payload, heading, room_behind_m):
     return heading
 
 
+def face_way_back(driver, heading, entry_heading):
+    """หันกลับไปทางด้านที่เพิ่งเดินเข้าช่องเป้าหมายมา ก่อนออกเดินขากลับ
+
+    การหันครั้งเดียวนี้ได้สองอย่างพร้อมกัน
+
+    1. เอา ToF ออกจากของที่เพิ่งวาง ซึ่งตอนนี้กองอยู่ตรงหน้าหุ่นในระยะแขน
+       (``ARM_PLACE_XY``) ใกล้กว่าเกณฑ์กำแพงหน้ามาก ถ้าอ่านเซนเซอร์จากท่านั้น
+       เลย ``observe()`` จะบันทึกของเป็นกำแพงลงแผนที่ ซึ่งลบออกไม่ได้ (ดู
+       ``Maze.set_wall``) แล้วขากลับจะเสียด้านนั้นไปตลอด
+    2. ได้ทิศตั้งต้นที่ยืนยันแล้วว่าโล่งจริง เพราะเป็นด้านที่หุ่นเพิ่งเดินผ่าน
+       มาเองเมื่อกี้ ไม่ใช่ด้านที่แผนที่แค่ "ยังไม่เคยเห็น" แล้วเดาว่าเปิด
+
+    ข้อควรรู้: ถ้าตั้งให้ขั้นสุดท้ายของ ``AIM_SEQUENCE`` หันไปทางเดียวกับด้านที่
+    เดินเข้าห้องมา ของที่วางจะไปกองขวางทางกลับพอดี กรณีนั้นด่าน ToF ก่อนออกตัว
+    จะเห็นแล้วมาร์กเป็นกำแพง ทำให้ขากลับต้องหาทางอื่น หรือจบด้วย [FAIL] ถ้าไม่มี
+    ทางอื่นให้ไป
+
+    Args:
+        driver (Driver): ตัวควบคุมการเคลื่อนที่
+        heading (int): ทิศที่หันอยู่หลังวางของเสร็จ
+        entry_heading (int or None): ทิศที่เดินเข้าช่องนี้มา None = ไม่เคยเดิน
+            เข้ามา (ช่องเป้าหมายคือช่องที่ยืนอยู่ตั้งแต่แรก) จึงไม่มีด้านไหน
+            ที่ยืนยันแล้วให้หันไปหา ปล่อยให้ Flood Fill เลือกเองทั้งหมด
+
+    Returns:
+        int: ทิศที่หุ่นหันอยู่หลังจบ
+    """
+    if entry_heading is None:
+        return heading
+    return driver.turn_to(heading, (entry_heading + 2) % 4)
+
+
 # =====================================================================
 # State machine หลัก - search run ด้วย Flood Fill
 # =====================================================================
-def run_search(hub, driver, payload):
-    """เดินสำรวจด้วย Flood Fill จากช่องเริ่มต้นจนถึงช่องเป้าหมาย
+def run_search(hub, driver, payload, go_home=True):
+    """เดินสำรวจด้วย Flood Fill ตามลำดับ หยิบของ -> วางของ -> เดินกลับ
+
+    ทั้งสามเฟสใช้ลูปเดียวกันหมด ต่างกันแค่ ``maze.goals`` ที่ตั้งใหม่ตอนจบแต่ละ
+    เฟส แผนที่ไม่ถูกล้างระหว่างเฟส ขากลับจึงเริ่มจากความรู้ทั้งหมดที่สะสมมา
+
+    Args:
+        hub (SensorHub): ตัวอ่านเซนเซอร์
+        driver (Driver): ตัวควบคุมการเคลื่อนที่
+        payload (Payload or None): แขนกลและกริปเปอร์ None = ไม่คีบไม่วาง
+        go_home (bool): False = วางของแล้วจบตรงช่องเป้าหมาย ไม่ต้องเดินกลับ
+            (มาจาก --no-return) ค่า True ยังเดินกลับก็ต่อเมื่อตั้ง
+            ``RETURN_CELL`` ไว้ด้วย
 
     Returns:
-        bool: True เมื่อถึงเป้าหมายสำเร็จ
+        bool: True เมื่อจบครบทุกเฟสที่ตั้งไว้
     """
     maze = Maze(MAZE_W, MAZE_H, GOAL_CELLS)
     x, y = START_CELL
     heading = START_HEADING
+
+    return_cell = tuple(RETURN_CELL) if go_home and RETURN_CELL is not None \
+        else None
 
     print("=" * 62)
     print("  MAZE SEARCH RUN - Flood Fill")
     print("  สนาม {0}x{1} ช่องละ {2:.2f} m | เริ่มที่ {3} หัน {4} | เป้าหมาย {5}"
           .format(MAZE_W, MAZE_H, CELL_SIZE_M, START_CELL,
                   DIR_NAMES[START_HEADING], GOAL_CELLS))
+    if return_cell is not None:
+        print("  วางของเสร็จแล้วเดินกลับไปที่ช่อง {0}".format(return_cell))
     print("=" * 62)
 
     # ตั้งเป้าเฟสแรกไปที่ช่องหยิบของเสมอ ถ้าเป็นช่องเริ่มต้นก็แค่หยิบอยู่กับที่
@@ -1762,6 +1839,11 @@ def run_search(hub, driver, payload):
     # ระยะที่เพิ่งเดินเข้าช่องปัจจุบันมาตามทิศที่หันอยู่ตอนนี้ 0 = ไม่รู้ว่าถอย
     # กลับไปได้แค่ไหน (ยังไม่เคยเดิน หรือหมุนตัวหลังเข้าช่องไปแล้ว)
     entry_travel = 0.0
+    # ทิศที่เดินเข้าช่องปัจจุบันมา ต่างจาก entry_travel ตรงที่การหมุนตัวไม่ทำให้
+    # ค่านี้ใช้ไม่ได้ เพราะมันบอก "ด้านไหนของช่องที่เปิด" ซึ่งไม่เปลี่ยนตามท่าหุ่น
+    entry_heading = None
+    # ยังไม่ได้วางของ ใช้แยกว่ารอบที่ถึง maze.goals คือถึงจุดวาง หรือกลับถึงบ้าน
+    place_pending = True
     # นับ "ช่องที่เดินผ่านจริง" แยกจากรอบของลูป เพราะรอบที่หยิบของ รอบที่เดินไม่
     # ผ่าน และรอบที่ยกเลิกเพราะ SAFETY ก็กินรอบไปด้วยทั้งที่หุ่นไม่ได้ย้ายช่อง
     moves = 0
@@ -1787,16 +1869,41 @@ def run_search(hub, driver, payload):
             print("[PLAN] มุ่งหน้าไปเป้าหมาย {0}".format(maze.goals))
             continue
 
-        if (x, y) in maze.goals:
+        if (x, y) in maze.goals and place_pending:
             print("\n[GOAL] ถึงช่องเป้าหมาย {0} แล้ว เดินมา {1} ช่อง"
                   .format((x, y), moves))
             driver.stop()
+            place_pending = False
             if payload is not None:
                 # entry_travel = ระยะที่เพิ่งเดินเข้าช่องนี้มา ซึ่งเป็นพื้นที่
                 # เดียวข้างหลังที่หุ่นเพิ่งผ่านมาเองแล้วว่าโล่งจริง แผนที่บอก
                 # ไม่ได้ เพราะ goal ถูกเช็คก่อน observe() ที่ช่องนี้
                 heading = place_on_target(driver, payload, heading,
                                           entry_travel)
+
+            # ปล่อยของไม่ออก = _lower_and_release คาแขนไว้ที่ท่าวางและกางนิ้ว
+            # ค้างไว้ให้คนมาหยิบออก เดินทั้งท่านั้นคือลากแขนที่ยื่นสุดไปครูด
+            # กำแพง จบตรงนี้ดีกว่าเดินกลับ
+            arm_stuck_out = payload is not None and payload.holding
+            if arm_stuck_out:
+                print("[WARN] ปล่อยวัตถุไม่ออก แขนยังยื่นค้างอยู่ที่ท่าวาง "
+                      "จึงไม่เดินกลับ ให้เอาวัตถุออกจากมือก่อน")
+
+            if return_cell is not None and not arm_stuck_out:
+                maze.goals = [return_cell]
+                heading = face_way_back(driver, heading, entry_heading)
+                entry_travel = 0.0      # หันแล้ว ข้างหลังไม่ใช่ทางที่เพิ่งผ่าน
+                print("[PLAN] วางของแล้ว เดินกลับไปที่ช่อง {0}"
+                      .format(return_cell))
+                continue
+
+            print(maze.render(robot=(x, y, heading), legend=True))
+            return True
+
+        if (x, y) in maze.goals:
+            print("\n[HOME] กลับถึงช่อง {0} แล้ว เดินทั้งหมด {1} ช่อง"
+                  .format((x, y), moves))
+            driver.stop()
             print(maze.render(robot=(x, y, heading), legend=True))
             return True
 
@@ -1823,8 +1930,10 @@ def run_search(hub, driver, payload):
         print(maze.render(dist=dist, robot=(x, y, heading), legend=True))
 
         if dist[x][y] >= INF:
-            print("\n[FAIL] จากความรู้ปัจจุบัน ไปเป้าหมายไม่ได้แล้ว "
-                  "(ทุกทางที่รู้จักถูกกำแพงปิดหมด)")
+            # บอกด้วยว่าตันตอนขาไหน เพราะขากลับใช้ลูปเดียวกันและพิมพ์ที่เดียวกัน
+            print("\n[FAIL] จากความรู้ปัจจุบัน ไป{0}ไม่ได้แล้ว "
+                  "(ทุกทางที่รู้จักถูกกำแพงปิดหมด)"
+                  .format("เป้าหมาย" if place_pending else "ช่องที่จะกลับไป"))
             return False
 
         next_heading = maze.choose_next_heading(x, y, heading, dist)
@@ -1854,6 +1963,7 @@ def run_search(hub, driver, payload):
             x, y = x + DX[heading], y + DY[heading]
             moves += 1
             entry_travel = traveled
+            entry_heading = heading
             fail_key = None
             fail_count = 0
         else:
@@ -2246,8 +2356,11 @@ def run_sim():
     แทนที่จะอ่านเซนเซอร์ ก็ไปถามเขาวงกตความจริงตรง ๆ จึงยืนยันได้ว่าตรรกะการ
     วางแผนถูกต้อง ก่อนเอาไปเจอกับความไม่แน่นอนของเซนเซอร์และล้อในสนามจริง
 
+    จำลองครบทุกเฟสเหมือน ``run_search`` คือไปหยิบของ ไปวางของ แล้วเดินกลับ
+    ส่วนการคีบและการวางจริงไม่มีอะไรให้จำลอง
+
     Returns:
-        bool: True เมื่อเดินถึงเป้าหมาย
+        bool: True เมื่อเดินครบทุกเฟส
     """
     truth = Maze(MAZE_W, MAZE_H, GOAL_CELLS)
     for cell_a, cell_b in SIM_BLOCKED_EDGES:
@@ -2264,8 +2377,9 @@ def run_sim():
     heading = START_HEADING
     path = [(x, y)]
 
-    # จำลองการสลับเป้าหมายสองเฟสด้วย เพื่อให้ตรวจแผนการเดินได้ก่อนลงสนามจริง
-    # ส่วนการคีบจริงไม่มีอะไรให้จำลอง
+    # จำลองการสลับเป้าหมายทุกเฟสด้วย เพื่อให้ตรวจแผนการเดินได้ก่อนลงสนามจริง
+    return_cell = tuple(RETURN_CELL) if RETURN_CELL is not None else None
+    place_pending = True
     pick_pending = PICK_CELL is not None
     if pick_pending:
         known.goals = [tuple(PICK_CELL)]
@@ -2283,7 +2397,17 @@ def run_sim():
             continue
 
         if (x, y) in known.goals:
-            print("\n[GOAL] ถึงเป้าหมายใน {0} ช่อง".format(len(path) - 1))
+            if place_pending:
+                print("\n[GOAL] ถึงเป้าหมายใน {0} ช่อง".format(len(path) - 1))
+                place_pending = False
+                if return_cell is not None:
+                    known.goals = [return_cell]
+                    print("[PLAN] วางของแล้ว เดินกลับไปที่ช่อง {0}"
+                          .format(return_cell))
+                    continue
+            else:
+                print("\n[HOME] กลับถึงช่อง {0} แล้ว เดินทั้งหมด {1} ช่อง"
+                      .format((x, y), len(path) - 1))
             print("เส้นทางที่เดินจริง: {0}".format(
                 " -> ".join(str(cell) for cell in path)))
             print("\nแผนที่ที่หุ่นสร้างได้:")
@@ -2339,6 +2463,8 @@ def main():
                         help="วิธีเชื่อมต่อหุ่น (ค่าเริ่มต้น {0})".format(CONN_TYPE))
     parser.add_argument("--no-payload", action="store_true",
                         help="ข้ามการคีบและวางวัตถุ ใช้ตอนดีบักเฉพาะการเดิน")
+    parser.add_argument("--no-return", action="store_true",
+                        help="วางของแล้วจบตรงช่องเป้าหมาย ไม่ต้องเดินกลับ")
     parser.add_argument("--armtest", action="store_true",
                         help="ยื่นแขนหยิบของตรงหน้า ใช้จูน ARM_PICK_XY "
                              "หุ่นจะไม่เดินไปไหน")
@@ -2388,7 +2514,8 @@ def main():
             else:
                 print("[INFO] ข้ามการคีบและวางวัตถุ")
 
-            success = run_search(hub, driver, payload)
+            success = run_search(hub, driver, payload,
+                                 go_home=not args.no_return)
     except KeyboardInterrupt:
         print("\n[STOP] ผู้ใช้สั่งหยุด")
     finally:
