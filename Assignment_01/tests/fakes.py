@@ -232,6 +232,10 @@ class Corridor(object):
         self.stale = stale
         self.dt = dt
         self.pos = 0.0
+        #: int or None: เกณฑ์ ToF ที่ถือว่ามีกำแพงหน้า make_driver เป็นคนเติมให้
+        #: จากคอนฟิกของโมดูลที่กำลังทดสอบ None = front_wall() คืน False เสมอ
+        #: (พฤติกรรมเดิมของ _Snapshot สำหรับ Corridor ที่ไม่ได้ผูกกับ Driver)
+        self.wall_mm = None
         #: list: ทุก (x, y, z) ที่ถูกสั่งออกไป รวมคำสั่งหยุดด้วย
         self.commands = []
 
@@ -260,6 +264,13 @@ class Corridor(object):
         snap.adc_left, snap.adc_right = self.adc
         snap.fresh = not self.stale
         snap.stale_reason = "tof" if self.stale else ""
+        # front_wall() ต้องตัดสินจากระยะจริง ไม่ใช่ False ตายตัวแบบ _Snapshot
+        # ไม่งั้นทางที่มีแต่ front_wall() เป็นประตู - เช่น align_front ที่ turn_to
+        # เรียกก่อนหมุน - จะไม่ถูกรันในเทสต์ไหนเลย
+        wall_mm = self.wall_mm
+        tof_mm = snap.tof_mm
+        snap.front_wall = lambda: (wall_mm is not None and tof_mm is not None
+                                   and tof_mm < wall_mm)
         return snap
 
     @property
@@ -274,6 +285,7 @@ def make_driver(tc, corridor):
     Returns:
         Driver: ตั้งศูนย์ไว้ที่ทิศเหนือแล้ว พร้อมเรียกเมธอดเคลื่อนที่ได้เลย
     """
+    corridor.wall_mm = tc.front_wall_threshold_mm()
     driver = tc.Driver(corridor, corridor)
     driver.yaw_sign = 1
     driver.yaw_zero = 0.0
@@ -371,7 +383,7 @@ class TruthDriver(object):
               .format(target_mm, self.world.tc.DIR_NAMES[heading]))
         return target_mm, 0.0, "stop"
 
-    def turn_to(self, current_heading, target_heading):
+    def turn_to(self, current_heading, target_heading, align_first=True):
         if current_heading != target_heading:
             self.turns.append((current_heading, target_heading))
         self.world.heading = target_heading

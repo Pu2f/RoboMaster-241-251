@@ -302,9 +302,12 @@ class _StubTurner(object):
 
     def __init__(self):
         self.turns = []
+        #: list: ค่า align_first ของแต่ละครั้งที่ถูกสั่งหัน
+        self.align_flags = []
 
-    def turn_to(self, current_heading, target_heading):
+    def turn_to(self, current_heading, target_heading, align_first=True):
         self.turns.append((current_heading, target_heading))
+        self.align_flags.append(align_first)
         return target_heading
 
 

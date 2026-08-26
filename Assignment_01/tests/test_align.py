@@ -295,9 +295,12 @@ class _StubDriver(object):
         self.reason = reason
         self.turns = []
         self.aligns = []
+        #: list: ค่า align_first ของแต่ละครั้งที่ถูกสั่งหัน
+        self.align_flags = []
 
-    def turn_to(self, current_heading, target_heading):
+    def turn_to(self, current_heading, target_heading, align_first=True):
         self.turns.append((current_heading, target_heading))
+        self.align_flags.append(align_first)
         return target_heading
 
     def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None):
@@ -359,6 +362,49 @@ def test_place_even_when_aim_fails(chk):
               heading == tc.AIM_SEQUENCE[-1][0])
 
 
+def test_turn_keeps_aimed_axis(chk):
+    """การหมุนระหว่างเล็งเป้าและก่อนเดินกลับ ต้องไม่ขยับล้อตามแนวเดิน
+
+    ``turn_to`` ปกติจะเรียก ``align_front`` ก่อนหมุนเมื่อ ToF เห็นกำแพงหน้า ซึ่ง
+    ดันหุ่นกลับไปที่ ``FRONT_STOP_MM`` แกนที่ถูกดันคือแกนที่กำลังจะกลายเป็นแกน
+    ด้านข้างหลังหมุนเสร็จ - ตอนเดินสำรวจนั่นคือสิ่งที่ต้องการ แต่ตอนเล็งเป้ามันคือ
+    ค่าที่ขั้นก่อนหน้าเพิ่งจัดไว้ และตอนจะเดินกลับ "กำแพง" ที่ ToF เห็นคือของที่
+    เพิ่งวางลงไปเอง ทั้งสองที่จึงต้องส่ง align_first=False
+    """
+    chk.section("เล็งเป้า: การหมุนไม่รบกวนแกนที่จัดไว้แล้ว")
+
+    tc = load()
+    tc.TURN_TIMEOUT_S = 0.05        # ปล่อยให้ยอมแพ้เร็ว ๆ เทสต์นี้ไม่สนใจ yaw
+    inside = tc.FRONT_STOP_MM + 100                     # อยู่ในระยะที่ align_front ทำงาน
+
+    road = Corridor(tof_mm=inside)
+    quiet(make_driver(tc, road).turn_to, 0, 1, False)
+    chk.check("align_first=False: ไม่มีคำสั่งเดินหน้า/ถอยเลย",
+              [c for c in road.commands if c[0] != 0.0] == [])
+    chk.check("align_first=False: ระยะเดิมไม่ขยับ", road.tof_mm == inside)
+
+    road = Corridor(tof_mm=inside)
+    quiet(make_driver(tc, road).turn_to, 0, 1)
+    chk.check("ค่าเริ่มต้นยังจัดระยะให้เหมือนเดิม (ตอนเดินสำรวจต้องใช้)",
+              [c for c in road.commands if c[0] != 0.0] != [])
+
+    # ระดับ place_on_target: ทุกขั้นที่หัน ต้องสั่งห้ามจัดระยะ
+    tc = load()
+    tc.AIM_SEQUENCE = [(2, 560), (3, None)]
+    driver = _StubDriver()
+    payload, _, _ = make_payload(tc, {"open": "opened", "close": "normal"})
+    quiet(payload.pick_up, None)
+    quiet(tc.place_on_target, driver, payload, 0, 0.6)
+    chk.check("ทุกขั้นที่หันตอนเล็งเป้าสั่ง align_first=False",
+              driver.align_flags == [False] * len(driver.turns))
+
+    # ระดับ face_way_back: ของที่เพิ่งวางอยู่หน้า ToF ห้ามเดินเข้าหา
+    driver = _StubDriver()
+    tc.face_way_back(driver, 3, 2)
+    chk.check("หันกลับก่อนเดินกลับสั่ง align_first=False",
+              driver.align_flags == [False])
+
+
 def test_aim_config_is_usable(chk):
     """ค่าใน AIM_SEQUENCE ต้องเป็นค่าที่ align_to_wall ทำตามได้จริง
 
@@ -386,6 +432,20 @@ def test_aim_config_is_usable(chk):
     chk.check("ทิศของขั้นสุดท้ายกำหนดไว้ชัดเจน หรือรับทิศที่มาถึงโดยตั้งใจ",
               len(tc.AIM_SEQUENCE) > 0)
     chk.check("งบระยะทางต่อขั้นมากกว่าศูนย์", tc.AIM_MAX_MOVE_M > 0)
+
+    # หุ่นเข้าช่องเป้าหมายมาโดย ToF เบรกให้ที่ FRONT_STOP_MM ขั้นแรกที่วัดระยะจึง
+    # ต้องขยับเท่ากับส่วนต่างนั้น ถ้างบไม่พอ align_to_wall จะจบด้วย "budget" คือ
+    # หยุดกลางทางแล้วหันไปวางทั้งที่ยังไม่ถึงเป้า มีแค่ [WARN] บรรทัดเดียวเตือน
+    measured = [s for s in tc.AIM_SEQUENCE if s[1] is not None]
+    if measured:
+        need_m = abs(measured[0][1] - tc.FRONT_STOP_MM) / 1000.0
+        chk.check("งบระยะทาง {0:.2f} m พอสำหรับขั้นแรก (ต้องขยับ {1:.3f} m "
+                  "จาก {2}mm ไป {3}mm)"
+                  .format(tc.AIM_MAX_MOVE_M, need_m, tc.FRONT_STOP_MM,
+                          measured[0][1]),
+                  tc.AIM_MAX_MOVE_M >= need_m)
+    chk.check("งบระยะทางไม่เกินหนึ่งช่อง (ข้างหลังยืนยันว่าโล่งได้แค่นั้น)",
+              tc.AIM_MAX_MOVE_M <= tc.CELL_SIZE_M)
 
 
 def test_no_backoff_without_ground_behind(chk):
@@ -436,6 +496,7 @@ def run(chk=None):
     test_aim_sequence_wiring(chk)
     test_turn_only_step(chk)
     test_place_even_when_aim_fails(chk)
+    test_turn_keeps_aimed_axis(chk)
     test_aim_config_is_usable(chk)
     test_fallback_without_aim(chk)
     test_no_backoff_without_ground_behind(chk)
