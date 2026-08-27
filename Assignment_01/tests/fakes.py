@@ -1,35 +1,75 @@
 # -*- coding: utf-8 -*-
-"""ฮาร์ดแวร์ปลอมสำหรับทดสอบ test_code.py โดยไม่ต้องต่อหุ่น
+"""ฮาร์ดแวร์ปลอมสำหรับทดสอบแพ็กเกจ maze_solver โดยไม่ต้องต่อหุ่น
 
-โหลด ``test_code.py`` เป็นโมดูลผ่าน importlib เพราะมันเป็นสคริปต์ที่รันตรง ๆ
-ไม่ใช่แพ็กเกจ ทุกอย่างที่อยู่หลัง ``if __name__ == "__main__"`` จึงไม่ถูกรัน
+โหลดทุกโมดูลของแพ็กเกจใหม่ทั้งชุดในแต่ละครั้ง แล้วห่อไว้ด้วย :class:`Bundle`
+ให้มองเห็นเป็นเนมสเปซเดียว เทสต์จึงเขียนว่า ``tc.CELL_SIZE_M`` หรือ ``tc.Maze``
+ได้โดยไม่ต้องรู้ว่าชื่อไหนย้ายไปอยู่โมดูลไหน
 
 ตัวปลอมในไฟล์นี้เลียนแบบเฉพาะส่วนที่โค้ดจริงเรียกใช้เท่านั้น ไม่ได้จำลองฟิสิกส์
 - Fake* = ตอบตามสคริปต์ที่เทสต์กำหนด ใช้ตรวจว่าสั่งอะไรออกไปบ้าง
 - Truth* = ตอบตามเขาวงกตความจริง ใช้รัน run_search ทั้งรอบให้จบจริง
 """
-import importlib.util
+import importlib
 import io
 import os
 import sys
 
-#: str: พาธของไฟล์ที่กำลังทดสอบ อ้างจากตำแหน่งไฟล์นี้ ย้ายโฟลเดอร์ทั้งชุดได้
-TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                      os.pardir, "test_code.py")
+#: str: โฟลเดอร์ที่มีแพ็กเกจอยู่ อ้างจากตำแหน่งไฟล์นี้ ย้ายโฟลเดอร์ทั้งชุดได้
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+#: str: ชื่อแพ็กเกจที่กำลังทดสอบ
+PACKAGE = "maze_solver"
+
+#: tuple: โมดูลทั้งหมดของแพ็กเกจ เรียงจากชั้นล่างขึ้นบนตามลำดับการนำเข้า
+MODULES = ("directions", "config", "geometry", "readings", "sensors", "maze",
+           "driver", "payload", "search", "calibrate", "armtest", "sim", "cli")
+
+
+class Bundle(object):
+    """มองทุกโมดูลของแพ็กเกจเป็นเนมสเปซเดียว
+
+    การอ่านจะไล่หาชื่อจากทุกโมดูลตามลำดับใน ``MODULES``
+
+    การเขียนจะเขียนลง "ทุกโมดูลที่มีชื่อนั้นอยู่" ไม่ใช่โมดูลแรกที่เจอ เพราะ
+    โมดูลที่ ``from ... import`` ชื่อนั้นไปเก็บไว้เอง จะไม่เห็นการแก้ที่ต้นทาง
+    ส่วนชื่อที่ไม่มีในโมดูลไหนเลย แปลว่าเป็นการบังชื่อจาก builtins (เทสต์ใช้
+    บัง ``input`` ตอนทดสอบโหมดที่ถามผู้ใช้) ซึ่งต้องบังให้ครบทุกโมดูล
+
+    ค่าคงที่ที่ปรับจูนได้อยู่ใน ``config`` โมดูลเดียว และโมดูลอื่นอ้างผ่าน
+    ``config.X`` เสมอ การแก้ค่าจากตรงนี้จึงมีผลทันทีทั้งแพ็กเกจ
+    """
+
+    def __init__(self, modules):
+        object.__setattr__(self, "_modules", modules)
+
+    def __getattr__(self, name):
+        for module in self._modules:
+            if hasattr(module, name):
+                return getattr(module, name)
+        raise AttributeError("ไม่มี {0} ในแพ็กเกจ {1}".format(name, PACKAGE))
+
+    def __setattr__(self, name, value):
+        owners = [m for m in self._modules if hasattr(m, name)]
+        for module in owners or self._modules:
+            setattr(module, name, value)
 
 
 def load():
-    """โหลด test_code.py ใหม่หนึ่งชุด แล้วย่นเวลารอทั้งหมดให้เทสต์จบเร็ว
+    """โหลดแพ็กเกจใหม่หนึ่งชุด แล้วย่นเวลารอทั้งหมดให้เทสต์จบเร็ว
 
-    โหลดใหม่ทุกครั้งเพื่อให้แต่ละเทสต์แก้ค่าคงที่ได้โดยไม่กระทบเทสต์อื่น
+    โหลดใหม่ทุกครั้งเพื่อให้แต่ละเทสต์แก้ค่าคงที่ได้โดยไม่กระทบเทสต์อื่น จึงต้อง
+    ล้าง ``sys.modules`` ก่อน ไม่งั้น import จะคืนของเดิมที่เทสต์ก่อนแก้ค่าไว้
 
     Returns:
-        module: โมดูล test_code ที่พร้อมใช้
+        Bundle: เนมสเปซรวมของแพ็กเกจที่พร้อมใช้
     """
-    spec = importlib.util.spec_from_file_location("test_code_under_test",
-                                                  TARGET)
-    tc = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(tc)
+    for name in [n for n in sys.modules
+                 if n == PACKAGE or n.startswith(PACKAGE + ".")]:
+        del sys.modules[name]
+    tc = Bundle([importlib.import_module(PACKAGE + "." + name)
+                 for name in MODULES])
     tc.GRIPPER_ACT_S = 0.01
     tc.PAYLOAD_LOAD_S = 0.01
     tc.ARMTEST_TOF_SAMPLES = 3
