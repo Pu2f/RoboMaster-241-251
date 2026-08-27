@@ -244,6 +244,17 @@ ALIGN_TOLERANCE_MM = 18
 # แทบไม่มีผล ตั้งสูงกว่านี้คือยอมเสียเวลาไล่จับ noise ของเซนเซอร์ที่ไม่มีวันจบ
 ALIGN_MAX_PASSES = 2
 
+# ยอมให้ค่า ToF ที่วัดได้ ห่างจากค่าที่คาดไว้ได้กี่ mm ก่อนจะไม่เชื่อ
+#
+# ใช้สองที่ ทั้งตอนเล็งเป้าและตอนเดินสำรวจ กันคนละเคสแต่เป็นความผิดพลาดชนิด
+# เดียวกัน คือ "ค่าที่ดูสมเหตุสมผลแต่ผิด" - ตอนเล็งคือลำแสงเล็ดลอดผ่านประตูไป
+# โดนกำแพงห้องถัดไป ตอนเดินสำรวจคือหุ่นนับช่องพลาดจนคิดว่าตัวเองอยู่คนละที่
+#
+# ครึ่งช่องคือขอบเขตธรรมชาติ เพราะถ้าหุ่นอยู่ในช่องที่ถูกต้องจริง ตำแหน่งมันจะ
+# ผิดจากกลางช่องได้ไม่เกินครึ่งช่องตามนิยาม ค่าที่หลุดไปกว่านั้นแปลว่าหุ่นอยู่
+# คนละช่องกับที่คิด หรือกำลังมองอย่างอื่นที่ไม่ใช่กำแพงที่ตั้งใจวัด
+TOF_SANITY_WINDOW_MM = None     # None = ใช้ครึ่งช่อง
+
 # ---------- การนับช่อง ----------
 CELL_COMPLETE_RATIO = 0.85      # เดินได้ >= 85% ของช่อง = ถือว่าเข้าช่องใหม่แล้ว
 TOF_STOP_MIN_RATIO = 0.50       # ถ้าจบเพราะ ToF ต้องเดินมาแล้วอย่างน้อย 50%
@@ -909,12 +920,20 @@ class SensorHub(object):
           check จะเห็นกำแพงด้วย ToF แล้วมาร์กลงแผนที่ให้เอง
         * เดาว่ามีกำแพงทั้งที่ไม่มี - ปิดทางเดินนั้นถาวรและไม่มีอะไรมาแก้ให้
 
+        คืนระยะ ToF มาด้วย เพราะเก็บตัวอย่างชุดเดียวกันอยู่แล้ว การแยกไปเรียก
+        :meth:`read_tof_settled` อีกรอบคือการจอดรออ่านเซนเซอร์ซ้ำฟรี ๆ ทุกช่อง
+
         Returns:
-            tuple: (front, left, right) เป็น bool ทั้งสามตัว
+            tuple: (front, left, right, tof_mm) สามตัวแรกเป็น bool ตัวสุดท้าย
+                เป็นระยะหน่วย mm หรือ None เมื่อส่วนใหญ่อ่านไม่ได้
         """
+        samples = max(1, samples)
         votes = {"front": [0, 0], "left": [0, 0], "right": [0, 0]}
-        for _ in range(max(1, samples)):
+        distances = []
+        for _ in range(samples):
             snap = self.snapshot()
+            if snap.tof_mm is not None:
+                distances.append(snap.tof_mm)
             for key, value in (("front", snap.front_wall()),
                                ("left", wall_from_adc(snap.adc_left,
                                                       SHARP_LEFT_WALL_ADC)),
@@ -925,9 +944,12 @@ class SensorHub(object):
                 elif value is False:
                     votes[key][1] += 1
             time.sleep(WALL_VOTE_INTERVAL)
+        tof_mm = (float(statistics.median(distances))
+                  if len(distances) * 2 > samples else None)
         return (votes["front"][0] > votes["front"][1],
                 votes["left"][0] > votes["left"][1],
-                votes["right"][0] > votes["right"][1])
+                votes["right"][0] > votes["right"][1],
+                tof_mm)
 
 
 # =====================================================================
@@ -1059,6 +1081,47 @@ class Maze(object):
         self.set_wall(x, y, heading, front)
         self.set_wall(x, y, (heading + 1) % 4, right)
         self.set_wall(x, y, (heading + 3) % 4, left)
+
+    def predict_tof(self, x, y, direction):
+        """float or None: ระยะที่ ToF ควรอ่านได้ ถ้ายืนกลางช่อง (x, y) หันไปทิศนี้
+
+        ไล่ออกไปทีละช่องตามทิศที่ให้มา จนเจอกำแพงแรกที่ "เคยเห็นมาแล้วจริง" แล้ว
+        แปลงจำนวนช่องเป็นมิลลิเมตร ช่องแรกอ่านได้ ``FRONT_STOP_MM`` ตามนิยาม
+        ทุกช่องที่ไกลออกไปบวกเพิ่มช่องละ ``CELL_SIZE_M``
+
+        มีไว้เทียบกับค่าที่วัดได้จริง เพื่อจับกรณีที่หุ่นไม่ได้อยู่ช่องที่คิดว่าอยู่
+        หรือ ToF กำลังมองทะลุประตูไปเจออะไรที่ไม่ใช่กำแพงที่ตั้งใจวัด
+
+        คืน None เมื่อยังไม่รู้จริง ๆ ซึ่งต่างจาก "รู้ว่าไม่มีกำแพง" - Flood Fill
+        มองด้านที่ยังไม่เคยเห็นเป็นทางเปิดไว้ก่อนเพื่อกล้าเดิน แต่การทำนายระยะทำ
+        แบบนั้นไม่ได้ เพราะจะได้ตัวเลขที่ดูสมเหตุสมผลแต่ไม่มีอะไรรองรับ แล้วผู้
+        เรียกก็เอาไปเทียบราวกับเป็นความจริง
+
+        เป็นเมธอดอ่านอย่างเดียว ไม่แตะแผนที่ ทุกอย่างที่เขียนลง ``walls`` ลบไม่ได้
+        (ดู :meth:`set_wall`) การทำนายจึงต้องไม่มีผลข้างเคียงเด็ดขาด
+
+        Args:
+            x (int): พิกัดช่องที่ยืนอยู่
+            y (int): พิกัดช่องที่ยืนอยู่
+            direction (int): ทิศที่หันไป 0=N 1=E 2=S 3=W
+
+        Returns:
+            float or None: ระยะหน่วย mm None = แผนที่ยังไม่รู้พอจะทำนาย
+        """
+        cells = 0
+        cx, cy = x, y
+        while self.in_bounds(cx, cy):
+            if (cx, cy, direction) in self.objects:
+                # มีของที่หุ่นวางเองขวางอยู่ ToF เห็นของก่อนกำแพง แต่เราไม่รู้ว่า
+                # ของสูงเท่าไรหรือวางเยื้องแค่ไหน ทำนายระยะจึงไม่ได้
+                return None
+            if not self.is_known(cx, cy, direction):
+                return None
+            if self.has_wall(cx, cy, direction):
+                return FRONT_STOP_MM + cells * CELL_SIZE_M * 1000.0
+            cx, cy = cx + DX[direction], cy + DY[direction]
+            cells += 1
+        return None
 
     def flood(self, known_only=False):
         """คำนวณระยะจากทุกช่องไปยังเป้าหมายที่ใกล้ที่สุด ด้วย BFS ย้อนจากเป้าหมาย
@@ -1622,7 +1685,7 @@ class Driver(object):
         return None, moved, reason
 
     def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None,
-                      center=True):
+                      center=True, start_tof=None):
         """เดินหน้าหรือถอยจนกำแพงที่หันหน้าใส่ห่างเท่ากับ target_mm
 
         นี่คือความสามารถพื้นฐานที่ทำให้หุ่นจอดที่ตำแหน่งย่อยในช่องได้ ไม่ใช่แค่
@@ -1651,6 +1714,8 @@ class Driver(object):
             floor_mm: ห้ามเข้าใกล้กำแพงกว่านี้ None = ใช้ FRONT_STOP_MM
             center: True = ให้ Sharp ประคองกลางช่องระหว่างขยับ ต้องเป็น False
                 เมื่อแกนตั้งฉากถูกจัดตำแหน่งไปแล้ว
+            start_tof: ระยะที่ผู้เรียกวัดตอนจอดนิ่งมาแล้ว None = วัดเอง
+                ส่งมาเพื่อไม่ต้องเสียเวลาวัดซ้ำ เมื่อผู้เรียกเพิ่งวัดไปเอง
 
         Returns:
             tuple: (tof_mm หลังจัด, moved_m, reason) โดย tof_mm เป็นค่ามัธยฐาน
@@ -1660,7 +1725,7 @@ class Driver(object):
         remaining = budget_m
         tof = None
         reason = "no_wall"
-        measured = None
+        measured = start_tof
 
         for attempt in range(1, ALIGN_MAX_PASSES + 1):
             tof, moved, reason = self._align_pass(
@@ -2067,7 +2132,8 @@ class Payload(object):
                                        "วางวัตถุก่อนจบงาน")
 
 
-def place_on_target(driver, payload, heading, room_behind_m):
+def place_on_target(driver, payload, heading, room_behind_m,
+                    hub=None, maze=None, cell=None):
     """วางของที่ช่องเป้าหมาย โดยเล็งด้วยกำแพงก่อนถ้าตั้ง AIM_SEQUENCE ไว้
 
     การเล็งคือการจัดตำแหน่งทีละแกน โดยหันหน้าเข้าหากำแพงของแกนนั้นแล้วใช้ ToF
@@ -2082,6 +2148,11 @@ def place_on_target(driver, payload, heading, room_behind_m):
         payload (Payload): แขนกลและกริปเปอร์
         heading (int): ทิศที่หุ่นหันอยู่ตอนถึงช่องเป้าหมาย
         room_behind_m (float): ระยะที่ถอยกลับได้อย่างปลอดภัย ใช้เฉพาะทางเดิม
+        hub (SensorHub or None): ใช้วัด ToF ตอนจอดนิ่งเพื่อตรวจก่อนขยับ
+            None = ข้ามการตรวจ ปล่อยให้ ``align_to_wall`` วัดเอง
+        maze (Maze or None): แผนที่ที่สะสมมา ใช้ทำนายระยะเทียบกับที่วัดได้จริง
+            None = ไม่มีด่านที่สอง
+        cell (tuple or None): ช่องที่หุ่นยืนอยู่ (x, y) ต้องมีคู่กับ ``maze``
 
     Returns:
         int: ทิศที่หุ่นหันอยู่หลังวางเสร็จ
@@ -2118,13 +2189,124 @@ def place_on_target(driver, payload, heading, room_behind_m):
               .format(index, total, DIR_NAMES[heading], target_mm,
                       DIR_NAMES[step.ref], float(step.target_mm)))
 
+        # ตรวจค่าที่วัดได้ก่อนขยับตาม เพราะการเชื่อ ToF ที่มองทะลุประตูไปเจอ
+        # กำแพงห้องถัดไป แปลว่าหุ่นจะขยับเต็มงบไปผิดทางอย่างมั่นใจ
+        measured = None
+        if hub is not None:
+            measured = hub.read_tof_settled()
+        # measured เป็น None = ToF ไม่เห็นอะไรในระยะวัด ปล่อยให้ align_to_wall
+        # จัดการ (มันคืน no_wall โดยไม่ขยับ) ด่านนี้ตัดสินเฉพาะค่าที่วัดได้จริง
+        if measured is not None:
+            predicted = None
+            if maze is not None and cell is not None:
+                predicted = maze.predict_tof(cell[0], cell[1], heading)
+            sane, why = aim_reading_is_sane(measured, target_mm, predicted)
+            if not sane:
+                print("[WARN] ขั้นที่ {0}/{1} ไม่ผ่านด่านตรวจ: {2}"
+                      .format(index, total, why))
+                print("       ข้ามการจัดระยะขั้นนี้ ใช้ตำแหน่งที่ได้มาตอนเข้าช่อง "
+                      "(ขยับตามค่าที่เชื่อไม่ได้ อันตรายกว่าวางเยื้อง)")
+                continue
+            if predicted is not None:
+                print("[AIM] ด่านตรวจผ่าน วัดได้ {0:.0f}mm แผนที่ว่า {1:.0f}mm"
+                      .format(measured, predicted))
+            else:
+                print("[AIM] ด่านตรวจผ่าน วัดได้ {0:.0f}mm "
+                      "(แผนที่ยังไม่รู้ระยะด้านนี้ ตรวจได้แค่เทียบกับเป้า)"
+                      .format(measured))
+        # center: เฉพาะขั้นแรกเท่านั้นที่ยอมให้ Sharp ประคองกลางช่องระหว่างขยับ
+        # ตอนนั้นแกนตั้งฉากยังไม่ถูกจัด การถูกดึงเข้ากลางช่องจึงเป็นผลดี เพราะแก้
+        # การเยื้องที่ yaw error สะสมไว้ระหว่างขยับให้ด้วย พอขั้นที่ 2 เป็นต้นไป
+        # แกนตั้งฉากคือแกนที่ขั้นก่อนหน้าเพิ่งจัดเสร็จ ปล่อยให้ Sharp แตะคือล้างทิ้ง
         driver.align_to_wall(target_mm, heading, AIM_MAX_MOVE_M,
-                             center=(index == 1))
+                             center=(index == 1), start_tof=measured)
 
     # วางต่อแม้จัดระยะไม่ครบ เพราะวางเยื้องเป้ายังดีกว่าไม่ได้วางเลย
     # align_to_wall พิมพ์เตือนไว้แล้วว่าขั้นไหนไม่เข้าเป้า
     payload.place()
     return heading
+
+
+def observation_is_trusted(maze, x, y, heading, tof_mm):
+    """ค่าที่เพิ่งอ่านได้ เชื่อพอจะบันทึกลงแผนที่หรือไม่
+
+    เทียบระยะที่วัดได้กับที่ ``maze`` ทำนายไว้สำหรับช่องและทิศนี้ ด่านนี้จับสิ่งที่
+    ไม่มีอะไรอื่นในโปรแกรมจับได้ คือ "หุ่นนับช่องพลาด" - ถ้าล้อลื่นหรือ odometry
+    เพี้ยนจนหุ่นคิดว่าอยู่คนละช่องกับที่อยู่จริง ทุกอย่างหลังจากนั้นยังทำงานได้
+    ปกติทุกประการ แค่เขียนแผนที่ผิดที่ไปเรื่อย ๆ ซึ่งลบออกไม่ได้ (ดู
+    :meth:`Maze.set_wall`) กว่าจะรู้ตัวก็ตอนหุ่นวิ่งชนกำแพงที่แผนที่ว่าโล่ง
+
+    ไม่มีข้อมูลพอให้ตัดสิน = เชื่อ ไม่ใช่ไม่เชื่อ เพราะช่องที่เพิ่งมาถึงครั้งแรก
+    ย่อมยังไม่มีใครเคยเห็นด้านหน้ามาก่อนเป็นปกติ ถ้าตีเป็นไม่เชื่อ หุ่นจะไม่ได้
+    บันทึกอะไรลงแผนที่เลยตลอดขาไป
+
+    Args:
+        maze (Maze): แผนที่ที่สะสมมา
+        x (int): ช่องที่หุ่นเชื่อว่าตัวเองอยู่
+        y (int): ช่องที่หุ่นเชื่อว่าตัวเองอยู่
+        heading (int): ทิศที่หันอยู่ตอนอ่าน
+        tof_mm (float or None): ระยะที่วัดได้ None = วัดไม่ได้
+
+    Returns:
+        tuple: (ok, ข้อความอธิบายเมื่อไม่ผ่าน)
+    """
+    if tof_mm is None:
+        return True, ""
+    predicted = maze.predict_tof(x, y, heading)
+    if predicted is None:
+        return True, ""
+    gap = tof_mm - predicted
+    if abs(gap) <= tof_sanity_window_mm():
+        return True, ""
+    return False, ("ToF วัดได้ {0:.0f}mm แต่แผนที่ว่าควรได้ {1:.0f}mm "
+                   "(ต่าง {2:+.0f}mm)".format(tof_mm, predicted, gap))
+
+
+def tof_sanity_window_mm():
+    """float: ครึ่งความกว้างของหน้าต่างที่ยอมรับค่า ToF หน่วย mm"""
+    if TOF_SANITY_WINDOW_MM is not None:
+        return float(TOF_SANITY_WINDOW_MM)
+    return CELL_SIZE_M * 1000.0 / 2.0
+
+
+def aim_reading_is_sane(measured_mm, target_mm, predicted_mm=None):
+    """ตรวจว่าค่า ToF ที่เพิ่งวัดได้ เชื่อถือได้พอจะขยับตามหรือไม่
+
+    ตรวจสองด่านที่มาจากคนละแหล่ง จึงจับคนละเรื่องกัน
+
+    1. เทียบกับ ``target_mm`` ซึ่งมาจากโจทย์ใน ``AIM_SEQUENCE`` ด่านนี้ทำงานเสมอ
+       จับกรณีที่ค่าหลุดจากที่ควรเป็นเกินครึ่งช่อง
+    2. เทียบกับ ``predicted_mm`` ซึ่งมาจากแผนที่ที่หุ่นสร้างเอง (ดู
+       :meth:`Maze.predict_tof`) ด่านนี้ทำงานเฉพาะตอนแผนที่รู้จริง จับกรณีที่
+       หุ่นไม่ได้อยู่ช่องที่คิดว่าอยู่ ซึ่งด่านแรกมองไม่เห็น
+
+    ด่านนี้มีไว้ปฏิเสธค่าที่ "มีอยู่แต่เชื่อไม่ได้" เท่านั้น กรณีที่วัดไม่ได้เลย
+    เป็นคนละเรื่องและถูกจัดการที่ :meth:`Driver.align_to_wall` อยู่แล้ว
+    (คืน ``no_wall`` โดยไม่ขยับ) ผู้เรียกจึงต้องกรอง None ออกก่อนเรียกตัวนี้
+    ไม่งั้นจะกลายเป็นตัดสินใจเรื่องเดียวกันสองที่แล้วไม่ตรงกัน
+
+    Args:
+        measured_mm (float): ค่าที่วัดได้ตอนจอดนิ่ง
+        target_mm (float): ค่าที่ต้องการให้เป็นเมื่อจัดระยะเสร็จ
+        predicted_mm (float or None): ค่าที่แผนที่ทำนายไว้ None = แผนที่ไม่รู้
+
+    Returns:
+        tuple: (ok, ข้อความอธิบายเมื่อไม่ผ่าน)
+    """
+    window = tof_sanity_window_mm()
+    off_target = measured_mm - target_mm
+    if abs(off_target) > window:
+        return False, ("วัดได้ {0:.0f}mm ห่างจากเป้า {1:.0f}mm อยู่ {2:+.0f}mm "
+                       "ซึ่งเกินหน้าต่างที่ยอมรับ ({3:.0f}mm)"
+                       .format(measured_mm, target_mm, off_target, window))
+
+    if predicted_mm is not None:
+        off_map = measured_mm - predicted_mm
+        if abs(off_map) > window:
+            return False, ("วัดได้ {0:.0f}mm แต่แผนที่ว่าควรได้ {1:.0f}mm "
+                           "ต่างกัน {2:+.0f}mm (เกิน {3:.0f}mm)"
+                           .format(measured_mm, predicted_mm, off_map, window))
+    return True, ""
 
 
 def place_heading_for(entry_heading):
@@ -2276,7 +2458,8 @@ def run_search(hub, driver, payload, go_home=True):
                 # เดียวข้างหลังที่หุ่นเพิ่งผ่านมาเองแล้วว่าโล่งจริง แผนที่บอก
                 # ไม่ได้ เพราะ goal ถูกเช็คก่อน observe() ที่ช่องนี้
                 heading = place_on_target(driver, payload, heading,
-                                          entry_travel)
+                                          entry_travel, hub=hub, maze=maze,
+                                          cell=(x, y))
 
             # ปล่อยของไม่ออก = _lower_and_release คาแขนไว้ที่ท่าวางและกางนิ้ว
             # ค้างไว้ให้คนมาหยิบออก เดินทั้งท่านั้นคือลากแขนที่ยื่นสุดไปครูด
@@ -2328,14 +2511,35 @@ def run_search(hub, driver, payload, go_home=True):
                   .format(snap.stale_reason))
             return False
 
-        front, left, right = hub.read_walls_settled()
+        front, left, right, tof_mm = hub.read_walls_settled()
         print("ค่าดิบ -> ToF:{0} SharpL:{1} SharpR:{2} IR_L:{3} IR_R:{4}"
               .format(snap.tof_mm, snap.adc_left, snap.adc_right,
                       snap.ir_left, snap.ir_right))
         print("กำแพง -> หน้า:{0:d} ซ้าย:{1:d} ขวา:{2:d}"
               .format(front, left, right))
 
-        maze.observe(x, y, heading, front, left, right)
+        # เทียบระยะที่วัดได้กับที่แผนที่ทำนาย ก่อนจะเขียนอะไรลงแผนที่
+        #
+        # ทำได้ฟรีตรงนี้ เพราะหุ่นจอดนิ่งอยู่แล้วและเพิ่งอ่าน ToF ไปแล้วในชุด
+        # เดียวกับที่โหวตกำแพง ไม่ต้องหมุนเพิ่มและไม่ต้องอ่านเซนเซอร์ซ้ำ
+        #
+        # ด่านนี้จับสิ่งที่ไม่มีอะไรอื่นในโปรแกรมจับได้เลย คือ "หุ่นนับช่องพลาด"
+        # ถ้าล้อลื่นหรือ odometry เพี้ยนจนหุ่นคิดว่าอยู่ช่องหนึ่งแต่จริง ๆ อยู่อีก
+        # ช่อง ทุกอย่างหลังจากนั้นยังทำงานได้ปกติทุกประการ แค่เขียนแผนที่ผิดที่
+        # ไปเรื่อย ๆ ซึ่งลบออกไม่ได้ (ดู Maze.set_wall) กว่าจะรู้ตัวก็ตอนหุ่นวิ่ง
+        # ชนกำแพงที่แผนที่บอกว่าเป็นทางโล่ง
+        #
+        # ทำนายไม่ได้ = ยังไม่เคยเห็นด้านนั้น ซึ่งเป็นเรื่องปกติของช่องที่เพิ่งมา
+        # ถึงครั้งแรก ด่านจึงเงียบไปเองแล้วมาทำงานตอนเดินซ้ำที่เดิม (ขากลับ หรือ
+        # ตอนถอยออกจากทางตัน) กับตอนหันเข้าหาขอบสนามซึ่งรู้ตั้งแต่ยังไม่ออกเดิน
+        trusted, why = observation_is_trusted(maze, x, y, heading, tof_mm)
+        if trusted:
+            maze.observe(x, y, heading, front, left, right)
+        else:
+            print("[WARN] {0}".format(why))
+            print("       ไม่บันทึกกำแพงรอบนี้ลงแผนที่ - ถ้าหุ่นไม่ได้อยู่ช่อง "
+                  "({0}, {1}) จริง สิ่งที่เขียนลงไปจะผิดที่และลบออกไม่ได้"
+                  .format(x, y))
 
         # ขากลับไม่เดาว่าด้านที่ยังไม่เคยเห็นเป็นทางเปิด ใช้เฉพาะที่ตรวจแล้ว
         # ซึ่งครอบคลุมทุกขอบที่เดินผ่านมาแล้วเสมอ ทางกลับจึงมีอยู่แน่ ๆ อย่างน้อย

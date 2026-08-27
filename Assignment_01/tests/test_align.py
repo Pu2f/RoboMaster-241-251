@@ -325,7 +325,7 @@ class _StubDriver(object):
         return target_heading
 
     def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None,
-                      center=True):
+                      center=True, start_tof=None):
         self.aligns.append((target_mm, heading, budget_m, center))
         return target_mm, 0.0, self.reason
 
@@ -349,7 +349,6 @@ def test_turn_only_step(chk):
     quiet(payload.pick_up, None)
     arm.calls = []
     heading, out = quiet(tc.place_on_target, driver, payload, 0, 0.6)
-
 
     chk.check("หันครบสองขั้น", [t[1] for t in driver.turns] == [2, 3])
     chk.check("จัดระยะแค่ขั้นแรก", [a[0] for a in driver.aligns] == [first])
@@ -443,7 +442,6 @@ def _raises(fn, *args):
     return False
 
 
-
 def test_tof_forward_offset(chk):
     """ระยะที่หัว ToF ล้ำหน้าจุดหมุน ต้องอนุมานจาก FRONT_STOP_MM ได้เอง"""
     chk.section("เล็งเป้า: ระยะที่หัว ToF ล้ำหน้าจุดหมุน")
@@ -458,7 +456,6 @@ def test_tof_forward_offset(chk):
     tc = load()
     tc.TOF_FORWARD_OFFSET_MM = 180
     chk.check("ตั้งทับได้เมื่อวัดเอง", tc.tof_forward_offset_mm() == 180.0)
-
 
 
 def test_aim_target_math(chk):
@@ -521,7 +518,6 @@ def test_aim_target_math(chk):
                       tc.WEST, True))
 
 
-
 def test_aim_matches_previous_hardcoded_values(chk):
     """ค่าที่คำนวณได้ต้องเท่ากับตัวเลขที่เคยฮาร์ดโค้ดไว้
 
@@ -538,6 +534,220 @@ def test_aim_matches_previous_hardcoded_values(chk):
     chk.check("ขั้นที่ 2 ยังได้ 650mm เท่าเดิม (ได้ {0})".format(got[1]),
               abs(got[1] - 650) < 1e-9)
 
+
+def test_predict_tof(chk):
+    """แผนที่ต้องทำนายระยะ ToF ได้ และต้องยอมบอกว่า "ไม่รู้" เมื่อไม่รู้จริง"""
+    chk.section("เล็งเป้า: แผนที่ทำนายระยะ ToF")
+
+    tc = load()
+    cell = tc.CELL_SIZE_M * 1000.0
+    maze = tc.Maze(5, 6, [(0, 0)])
+
+    # _add_borders ใส่กำแพงขอบสนามให้แล้ว ช่องมุมจึงทำนายได้ทันที
+    chk.check("กำแพงติดช่องเลย = FRONT_STOP_MM ({0}mm)".format(tc.FRONT_STOP_MM),
+              maze.predict_tof(0, 0, tc.SOUTH) == tc.FRONT_STOP_MM)
+    chk.check("ยังไม่เคยตรวจด้านนั้น: ไม่เดา",
+              maze.predict_tof(0, 0, tc.NORTH) is None)
+
+    # เปิดทางให้รู้ทีละด้าน แล้วระยะต้องเพิ่มทีละหนึ่งช่อง
+    maze.set_wall(0, 0, tc.NORTH, False)
+    chk.check("รู้ว่าโล่งหนึ่งช่องแต่ยังไม่รู้ด้านถัดไป: ยังไม่เดา",
+              maze.predict_tof(0, 0, tc.NORTH) is None)
+    maze.set_wall(0, 1, tc.NORTH, True)
+    chk.check("กำแพงห่างหนึ่งช่อง = FRONT_STOP_MM + 1 ช่อง ({0:.0f}mm)"
+              .format(tc.FRONT_STOP_MM + cell),
+              maze.predict_tof(0, 0, tc.NORTH) == tc.FRONT_STOP_MM + cell)
+
+    maze = tc.Maze(5, 6, [(0, 0)])
+    maze.set_wall(0, 0, tc.NORTH, False)
+    maze.set_wall(0, 1, tc.NORTH, False)
+    maze.set_wall(0, 2, tc.NORTH, True)
+    chk.check("กำแพงห่างสองช่อง = FRONT_STOP_MM + 2 ช่อง ({0:.0f}mm)"
+              .format(tc.FRONT_STOP_MM + 2 * cell),
+              maze.predict_tof(0, 0, tc.NORTH) == tc.FRONT_STOP_MM + 2 * cell)
+
+    # ของที่วางเองบังอยู่ ทำนายระยะไม่ได้ เพราะไม่รู้ขนาดและตำแหน่งของ
+    maze = tc.Maze(5, 6, [(0, 0)])
+    maze.mark_object(0, 0, tc.SOUTH)
+    chk.check("มีของที่วางเองขวางอยู่: ไม่ทำนาย",
+              maze.predict_tof(0, 0, tc.SOUTH) is None)
+
+    # ต้องไม่แตะแผนที่เลย เพราะกำแพงที่เขียนลงไปแล้วลบไม่ได้
+    maze = tc.Maze(5, 6, [(0, 0)])
+    before = ([row[:] for row in maze.walls], [row[:] for row in maze.known])
+    maze.predict_tof(2, 2, tc.NORTH)
+    maze.predict_tof(0, 0, tc.SOUTH)
+    chk.check("อ่านอย่างเดียว ไม่เขียนอะไรลงแผนที่",
+              (maze.walls, maze.known) == before)
+
+
+def test_aim_reading_sanity(chk):
+    """ด่านตรวจต้องปัดค่าที่ "ดูสมเหตุสมผลแต่ผิด" ทิ้ง ก่อนหุ่นจะขยับตาม"""
+    chk.section("เล็งเป้า: ด่านตรวจค่า ToF ก่อนขยับ")
+
+    tc = load()
+    window = tc.tof_sanity_window_mm()
+    chk.check("หน้าต่างเริ่มต้น = ครึ่งช่อง ({0:.0f}mm)".format(window),
+              window == tc.CELL_SIZE_M * 1000.0 / 2.0)
+
+    ok, _ = tc.aim_reading_is_sane(560, 560)
+    chk.check("ตรงเป้าพอดี: ผ่าน", ok is True)
+    ok, _ = tc.aim_reading_is_sane(560 + window - 1, 560)
+    chk.check("ห่างเป้าเกือบเต็มหน้าต่าง: ยังผ่าน", ok is True)
+
+    # เคสจริงที่อันตราย: ToF มองทะลุประตูไปโดนกำแพงห้องถัดไป
+    ok, why = tc.aim_reading_is_sane(560 + window + 1, 560)
+    chk.check("หลุดหน้าต่าง: ไม่ผ่าน", ok is False)
+    chk.check("บอกด้วยว่าห่างเป้าไปเท่าไร", "ห่างจากเป้า" in why)
+
+    # ด่านที่สอง: ผ่านด่านเป้าแต่ไม่ตรงกับแผนที่ = หุ่นไม่ได้อยู่ช่องที่คิด
+    ok, _ = tc.aim_reading_is_sane(560, 560, predicted_mm=565)
+    chk.check("แผนที่เห็นตรงกัน: ผ่าน", ok is True)
+    ok, why = tc.aim_reading_is_sane(560, 560, predicted_mm=560 + window + 1)
+    chk.check("แผนที่ว่าคนละเรื่อง: ไม่ผ่าน", ok is False)
+    chk.check("บอกด้วยว่าแผนที่ว่าเท่าไร", "แผนที่ว่าควรได้" in why)
+
+    ok, _ = tc.aim_reading_is_sane(560, 560, predicted_mm=None)
+    chk.check("แผนที่ไม่รู้: ข้ามด่านที่สอง ไม่ใช่ตกด่าน", ok is True)
+
+
+def test_aim_skips_move_on_bad_reading(chk):
+    """ค่าที่ไม่ผ่านด่านตรวจ ต้องไม่ถูกเอาไปขยับ แต่ยังต้องวางของ"""
+    chk.section("เล็งเป้า: ค่าที่เชื่อไม่ได้ ไม่ขยับตาม")
+
+    class _Hub(object):
+        """hub ที่คืนค่าซึ่งดูสมเหตุสมผลแต่ห่างเป้าเกินครึ่งช่อง"""
+
+        def __init__(self, mm):
+            self.mm = mm
+
+        def read_tof_settled(self, samples=None):
+            return self.mm
+
+    tc = load()
+    driver = _StubDriver()
+    payload, arm, _ = make_payload(tc, {"open": "opened", "close": "normal"})
+    quiet(payload.pick_up, None)
+    arm.calls = []
+    # ต้องหลุดหน้าต่างของ "ทุก" ขั้น เพราะด่านตรวจทำงานแยกกันทีละขั้น
+    far = max(t for t, _, _ in expected_aims(tc)) + tc.tof_sanity_window_mm() + 50
+    _, out = quiet(tc.place_on_target, driver, payload, 0, 0.6,
+                   hub=_Hub(far))
+    chk.check("ไม่สั่งจัดระยะเลยสักขั้น", driver.aligns == [])
+    chk.check("เตือนว่าไม่ผ่านด่านตรวจ", "ไม่ผ่านด่านตรวจ" in out)
+    chk.check("ยังวางของ (วางเยื้องดีกว่าไม่วาง)", tc.ARM_PLACE_XY in arm.calls)
+    chk.check("ไม่มีของค้างในมือ", payload.holding is False)
+
+    # ค่าที่ผ่านด่าน ต้องถูกส่งต่อให้ align_to_wall ใช้เลย ไม่ต้องวัดซ้ำ
+    tc = load()
+    driver = _StubDriver()
+    payload, arm, _ = make_payload(tc, {"open": "opened", "close": "normal"})
+    quiet(payload.pick_up, None)
+    good = expected_aims(tc)[0][0]
+    quiet(tc.place_on_target, driver, payload, 0, 0.6, hub=_Hub(good))
+    chk.check("ผ่านด่าน: ยังสั่งจัดระยะตามปกติ", len(driver.aligns) >= 1)
+
+
+def test_walls_settled_reports_distance(chk):
+    """read_walls_settled ต้องคืนระยะมาด้วย จากตัวอย่างชุดเดียวกับที่โหวตกำแพง"""
+    chk.section("เดินสำรวจ: อ่านกำแพงแล้วได้ระยะมาด้วย")
+
+    tc = load()
+    tc.WALL_VOTE_INTERVAL = 0.0
+    road = Corridor(tof_mm=740)
+    road.wall_mm = tc.front_wall_threshold_mm()
+    hub_result = tc.SensorHub.read_walls_settled(road, samples=5)
+    chk.check("คืนสี่ค่า", len(hub_result) == 4)
+    chk.check("ค่าที่สี่คือระยะที่วัดได้ ({0})".format(hub_result[3]),
+              hub_result[3] == 740.0)
+
+    road = Corridor(tof_mm=None)
+    road.wall_mm = tc.front_wall_threshold_mm()
+    chk.check("ไม่เห็นกำแพงในระยะวัด: ระยะเป็น None",
+              tc.SensorHub.read_walls_settled(road, samples=5)[3] is None)
+
+
+class _LyingHub(object):
+    """hub ที่บอกกำแพงตามความจริง แต่โกหกเรื่องระยะ
+
+    จำลองอาการที่ด่านเทียบแผนที่มีไว้จับ คือหุ่นนับช่องพลาดจนระยะที่วัดได้ไม่
+    เข้ากับที่แผนที่ทำนายไว้ ต่างกับ ``TruthHub`` ตรงที่ตัวนั้นคืน None คือ
+    "วัดระยะไม่ได้" ซึ่งทำให้ด่านเงียบไปเฉย ๆ
+
+    Args:
+        inner (TruthHub): ตัวจริงที่รู้กำแพง
+        mm (float): ระยะที่จะรายงานทุกครั้ง เลือกให้ไกลเกินกว่าที่แผนที่ทำนาย
+            ได้ในสนามขนาดนี้ เพื่อให้ขัดกับทุกคำทำนายที่เป็นไปได้
+    """
+
+    def __init__(self, inner, mm):
+        self.inner = inner
+        self.mm = mm
+
+    def read_walls_settled(self, samples=None):
+        front, left, right, _ = self.inner.read_walls_settled(samples)
+        return front, left, right, self.mm
+
+    def read_tof_settled(self, samples=None):
+        return self.mm
+
+    def snapshot(self):
+        return self.inner.snapshot()
+
+
+def test_observation_trust(chk):
+    """ตัดสินใจว่าจะบันทึกลงแผนที่ไหม จากระยะที่วัดได้เทียบกับที่ทำนายไว้"""
+    chk.section("เดินสำรวจ: เชื่อค่าที่อ่านได้ไหม")
+
+    tc = load()
+    cell = tc.CELL_SIZE_M * 1000.0
+    window = tc.tof_sanity_window_mm()
+    maze = tc.Maze(5, 6, [(0, 0)])
+
+    # (0,0) รู้ด้านใต้กับตะวันตกตั้งแต่ต้น เพราะ _add_borders ใส่ขอบสนามให้แล้ว
+    ok, _ = tc.observation_is_trusted(maze, 0, 0, tc.SOUTH, tc.FRONT_STOP_MM)
+    chk.check("ตรงกับที่ทำนาย: เชื่อ", ok is True)
+    ok, _ = tc.observation_is_trusted(maze, 0, 0, tc.SOUTH,
+                                      tc.FRONT_STOP_MM + window - 1)
+    chk.check("ต่างไม่เกินหน้าต่าง: ยังเชื่อ", ok is True)
+
+    # เคสจริงที่ด่านนี้มีไว้จับ: หุ่นคิดว่าอยู่ (0,0) แต่จริง ๆ อยู่ไกลออกไป
+    # จนระยะถึงขอบสนามใต้ไม่มีทางเป็นค่านี้ได้
+    ok, why = tc.observation_is_trusted(maze, 0, 0, tc.SOUTH,
+                                        tc.FRONT_STOP_MM + cell)
+    chk.check("ต่างเกินหน้าต่าง: ไม่เชื่อ", ok is False)
+    chk.check("บอกทั้งค่าที่วัดได้และค่าที่ทำนาย",
+              "วัดได้" in why and "แผนที่ว่าควรได้" in why)
+
+    # ไม่มีข้อมูลพอ = เชื่อ ไม่งั้นช่องที่เพิ่งมาถึงครั้งแรกจะไม่ถูกบันทึกเลย
+    ok, _ = tc.observation_is_trusted(maze, 0, 0, tc.NORTH, 9999)
+    chk.check("แผนที่ยังไม่รู้ด้านนั้น: เชื่อไว้ก่อน", ok is True)
+    ok, _ = tc.observation_is_trusted(maze, 0, 0, tc.SOUTH, None)
+    chk.check("วัดระยะไม่ได้: เชื่อไว้ก่อน", ok is True)
+
+
+def test_map_check_blocks_bad_observation(chk):
+    """run_search ต้องต่อสายด่านนี้ไว้จริง และยังเดินจนจบได้
+
+    กำแพงที่เขียนลงไปแล้วลบไม่ได้ (ดู Maze.set_wall) การเขียนตอนที่ยังไม่แน่ใจ
+    ว่าหุ่นอยู่ช่องไหนจริง จึงแย่กว่าการไม่เขียนอะไรเลย
+    """
+    chk.section("เดินสำรวจ: ต่อสายด่านเทียบแผนที่")
+
+    tc = load()
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (220, 0))
+    honest, out_honest = quiet(tc.run_search, hub, driver, payload)
+    chk.check("หุ่นที่วัดระยะไม่ได้: ยังถึงเป้าหมาย", honest is True)
+    chk.check("ไม่มีคำเตือนเรื่องแผนที่", "แต่แผนที่ว่าควรได้" not in out_honest)
+
+    tc = load()
+    hub, driver, payload, _, _ = make_world(tc, tc.START_CELL, (220, 0))
+    liar = _LyingHub(hub, 3000.0)
+    got, out_lying = quiet(tc.run_search, liar, driver, payload)
+    chk.check("หุ่นที่โกหกระยะ: ถูกจับได้", "แต่แผนที่ว่าควรได้" in out_lying)
+    chk.check("บอกด้วยว่าจะไม่บันทึกลงแผนที่",
+              "ไม่บันทึกกำแพงรอบนี้ลงแผนที่" in out_lying)
+    chk.check("ด่านนี้ไม่ทำให้หุ่นเดินไม่จบ", got is True)
 
 
 def test_aim_config_is_usable(chk):
@@ -636,6 +846,12 @@ def run(chk=None):
     test_tof_forward_offset(chk)
     test_aim_target_math(chk)
     test_aim_matches_previous_hardcoded_values(chk)
+    test_predict_tof(chk)
+    test_aim_reading_sanity(chk)
+    test_aim_skips_move_on_bad_reading(chk)
+    test_walls_settled_reports_distance(chk)
+    test_observation_trust(chk)
+    test_map_check_blocks_bad_observation(chk)
     test_aim_config_is_usable(chk)
     test_fallback_without_aim(chk)
     test_no_backoff_without_ground_behind(chk)

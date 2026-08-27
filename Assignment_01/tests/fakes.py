@@ -382,7 +382,7 @@ class TruthDriver(object):
         return clearance_mm, 0.0, "clear"
 
     def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None,
-                      center=True):
+                      center=True, start_tof=None):
         """บันทึกว่าถูกสั่งจัดระยะ โดยไม่ขยับโลกจำลอง
 
         เหตุผลเดียวกับ back_off_from_wall คือ TruthWorld หยาบระดับช่อง
@@ -432,13 +432,22 @@ class TruthHub(object):
         self.world = world
 
     def read_walls_settled(self, samples=None):
-        return self.world.walls_here()
+        """(front, left, right, tof_mm) โดย tof_mm เป็น None เสมอ
+
+        เหตุผลเดียวกับ :meth:`read_tof_settled` คือ TruthWorld หยาบระดับช่อง
+        บอกระยะเป็นมิลลิเมตรไม่ได้ None ทำให้ด่านเทียบกับแผนที่ใน run_search
+        เงียบไปเอง ซึ่งตรงกับที่ตั้งใจ เพราะเทสต์ชุดนี้ตรวจการเดินและการสร้าง
+        แผนที่ ส่วนด่านเทียบระยะถูกตรวจแยกด้วยหุ่นปลอมที่ให้ระยะจริงได้
+        """
+        return self.world.walls_here() + (None,)
 
     def read_tof_settled(self, samples=None):
         """ระยะ ToF ตอนจอดนิ่ง - TruthWorld ตอบไม่ได้
 
         TruthWorld รู้แค่ว่าหุ่นอยู่ช่องไหน ไม่มีตำแหน่งย่อยในช่อง จึงบอกระยะ
-        เป็นมิลลิเมตรไม่ได้ คืน None คือ "วัดไม่ได้"
+        เป็นมิลลิเมตรไม่ได้ คืน None คือ "วัดไม่ได้" ซึ่งทำให้ place_on_target
+        ข้ามด่านตรวจไปให้ align_to_wall จัดการเอง - ตรงกับที่ตั้งใจ เพราะเทสต์
+        ชุดนี้ตรวจการต่อสาย ส่วนตัวเลขระยะถูกตรวจแยกด้วย Corridor
         """
         return None
 

@@ -321,7 +321,7 @@ class _StubTurner(object):
         return target_heading
 
     def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None,
-                      center=True):
+                      center=True, start_tof=None):
         return target_mm, 0.0, "stop"
 
     def back_off_from_wall(self, clearance_mm, heading, limit_m):
