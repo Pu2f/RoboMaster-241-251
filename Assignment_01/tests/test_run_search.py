@@ -490,8 +490,20 @@ def test_place_heading_for_matches_the_real_thing(chk):
     """
     chk.section("ทิศที่วางของ: ตัวคำนวณตรงกับของจริง")
 
-    for sequence in ([(2, 560), (3, None)], [(None, None)], [(1, 300)], []):
+    def sequences(tc):
+        """ลำดับเล็งหลายแบบที่ต้องให้คำตอบตรงกันทั้งหมด"""
+        return (
+            [tc.AimStep(face=tc.SOUTH, ref=tc.NORTH, target_mm=400,
+                        span_mm=1200),
+             tc.AimStep(face=tc.WEST, ref=tc.WEST, target_mm=None)],
+            [tc.AimStep(face=None, ref=None, target_mm=None)],
+            [tc.AimStep(face=tc.EAST, ref=tc.EAST, target_mm=300)],
+            [],
+        )
+
+    for index in range(len(sequences(load()))):
         tc = load()
+        sequence = sequences(tc)[index]
         tc.AIM_SEQUENCE = sequence
         for entry in range(4):
             payload, _, _ = make_payload(tc, {"open": "opened",
