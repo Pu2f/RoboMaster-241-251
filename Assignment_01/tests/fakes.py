@@ -373,7 +373,8 @@ class TruthDriver(object):
               .format(clearance_mm, limit_m))
         return clearance_mm, 0.0, "clear"
 
-    def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None):
+    def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None,
+                      center=True):
         """บันทึกว่าถูกสั่งจัดระยะ โดยไม่ขยับโลกจำลอง
 
         เหตุผลเดียวกับ back_off_from_wall คือ TruthWorld หยาบระดับช่อง
@@ -382,7 +383,7 @@ class TruthDriver(object):
         Returns:
             tuple: (tof_mm, moved_m, reason) แบบเดียวกับ Driver ตัวจริง
         """
-        self.aligns.append((target_mm, heading, budget_m))
+        self.aligns.append((target_mm, heading, budget_m, center))
         print("[ALIGN] (จำลอง) เป้า {0}mm หัน {1}"
               .format(target_mm, self.world.tc.DIR_NAMES[heading]))
         return target_mm, 0.0, "stop"

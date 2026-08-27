@@ -1399,7 +1399,8 @@ class Driver(object):
         moved = math.hypot(snap.pos_x - start_x, snap.pos_y - start_y)
         return moved, reason
 
-    def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None):
+    def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None,
+                      center=True):
         """เดินหน้าหรือถอยจนกำแพงที่หันหน้าใส่ห่างเท่ากับ target_mm
 
         นี่คือความสามารถพื้นฐานที่ทำให้หุ่นจอดที่ตำแหน่งย่อยในช่องได้ ไม่ใช่แค่
@@ -1412,13 +1413,22 @@ class Driver(object):
         จึงได้แค่ประคองไม่ให้เบียดกำแพงข้างระหว่างขยับ
 
         การขยับตามแนวที่หันอยู่ไม่กระทบตำแหน่งตามแกนตั้งฉาก การจัดทีละแกนจึง
-        ไม่รบกวนกัน ตราบใดที่ไม่ใช้ strafe มาขยับเอง
+        ไม่รบกวนกัน แต่มีเงื่อนไขว่าต้องไม่ strafe ระหว่างทาง ซึ่งคุมด้วย ``center``
+
+        ``center=True`` ให้ Sharp ประคองกลางช่องระหว่างขยับ ซึ่งเป็นการ strafe
+        ตามแกนตั้งฉาก ใช้ได้เฉพาะตอนที่แกนนั้น "ยังไม่ถูกจัด" - ตอนนั้นการถูกดึง
+        เข้ากลางช่องเป็นผลดี เพราะแก้การเยื้องที่ yaw error สะสมไว้ให้ด้วย แต่ถ้า
+        แกนตั้งฉากถูกจัดไปแล้วโดยขั้นก่อนหน้า ต้องใช้ ``center=False`` ไม่งั้น
+        Sharp จะดันหุ่นกลับเข้ากลางช่องแล้วล้างงานของขั้นนั้นทิ้งเงียบ ๆ
+        (Sharp เล็งกลางช่องเสมอ ไม่รู้จักเป้าที่เราตั้งไว้)
 
         Args:
             target_mm: ระยะที่ต้องการให้ ToF อ่านได้เมื่อจบ
             heading: ทิศที่หุ่นหันอยู่ ใช้ประคอง yaw
             budget_m: ขยับได้ไกลสุดกี่เมตร กันความเสียหายเมื่อ ToF อ่านเพี้ยน
             floor_mm: ห้ามเข้าใกล้กำแพงกว่านี้ None = ใช้ FRONT_STOP_MM
+            center: True = ให้ Sharp ประคองกลางช่องระหว่างขยับ ต้องเป็น False
+                เมื่อแกนตั้งฉากถูกจัดตำแหน่งไปแล้ว
 
         Returns:
             tuple: (tof_mm หลังจัด, moved_m, reason)
@@ -1461,7 +1471,8 @@ class Driver(object):
                 return s.tof_mm is None or s.tof_mm >= target_mm
 
         speed = ALIGN_SPEED if forward else -ALIGN_SPEED
-        moved, reason = self._travel(speed, heading, budget, stop=reached)
+        moved, reason = self._travel(speed, heading, budget, stop=reached,
+                                     center=center)
 
         snap = self.hub.snapshot()
         got = ("ไกลเกินระยะวัด" if snap.tof_mm is None
@@ -1881,7 +1892,12 @@ def place_on_target(driver, payload, heading, room_behind_m):
             continue
         print("[AIM] ขั้นที่ {0}/{1} หัน{2} จัดระยะให้ ToF = {3}mm"
               .format(index, len(AIM_SEQUENCE), DIR_NAMES[heading], target_mm))
-        driver.align_to_wall(target_mm, heading, AIM_MAX_MOVE_M)
+        # center: เฉพาะขั้นแรกเท่านั้นที่ยอมให้ Sharp ประคองกลางช่องระหว่างขยับ
+        # ตอนนั้นแกนตั้งฉากยังไม่ถูกจัด การถูกดึงเข้ากลางช่องจึงเป็นผลดี เพราะแก้
+        # การเยื้องที่ yaw error สะสมไว้ระหว่างขยับให้ด้วย พอขั้นที่ 2 เป็นต้นไป
+        # แกนตั้งฉากคือแกนที่ขั้นก่อนหน้าเพิ่งจัดเสร็จ ปล่อยให้ Sharp แตะคือล้างทิ้ง
+        driver.align_to_wall(target_mm, heading, AIM_MAX_MOVE_M,
+                             center=(index == 1))
 
     # วางต่อแม้จัดระยะไม่ครบ เพราะวางเยื้องเป้ายังดีกว่าไม่ได้วางเลย
     # align_to_wall พิมพ์เตือนไว้แล้วว่าขั้นไหนไม่เข้าเป้า

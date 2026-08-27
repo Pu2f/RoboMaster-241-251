@@ -250,6 +250,9 @@ def test_aim_sequence_wiring(chk):
               all(a[2] == tc.AIM_MAX_MOVE_M for a in driver.aligns))
     chk.check("จัดระยะในทิศที่กำหนดไว้",
               [a[1] for a in driver.aligns] == [s[0] for s in measured])
+    chk.check("ประคองกลางช่องเฉพาะขั้นแรก",
+              [a[3] for a in driver.aligns]
+              == [i == 0 for i, _ in enumerate(measured)])
     chk.check("เล็งก่อนวางของ", out.index("[AIM]") < out.index("จุดวางของ"))
     chk.check("ขั้นสุดท้ายหันทิศที่จะยื่นแขนวาง",
               "ขั้นที่ {0}/{0} หัน{1}".format(
@@ -303,8 +306,9 @@ class _StubDriver(object):
         self.align_flags.append(align_first)
         return target_heading
 
-    def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None):
-        self.aligns.append((target_mm, heading, budget_m))
+    def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None,
+                      center=True):
+        self.aligns.append((target_mm, heading, budget_m, center))
         return target_mm, 0.0, self.reason
 
 
