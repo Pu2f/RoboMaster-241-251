@@ -12,6 +12,10 @@
 """
 import sys
 
+#: float: ขอบที่งบระยะทางของขั้นเล็งต้องเหลืออย่างน้อย หน่วย mm
+#: กันไม่ให้ AIM_MAX_MOVE_M ถูกตั้งพอดีเป๊ะจนคาลิเบรตขยับนิดเดียวก็พัง
+AIM_BUDGET_MARGIN_MM = 30.0
+
 from fakes import (Checker, Corridor, load, make_driver, make_payload,
                    make_world, quiet)
 
@@ -785,11 +789,14 @@ def test_aim_config_is_usable(chk):
     measured = [t for t, _, _ in expected_aims(tc)]
     if measured:
         need_m = abs(measured[0] - tc.FRONT_STOP_MM) / 1000.0
+        # เผื่อขอบด้วย ไม่ใช่แค่ ">=" เพราะงบที่พอดีเป๊ะแปลว่าคาลิเบรตขยับ
+        # นิดเดียวขั้นแรกก็จบด้วย [WARN] budget แล้วเล็งเพี้ยนแบบเงียบ ๆ
+        margin_mm = (tc.AIM_MAX_MOVE_M - need_m) * 1000.0
         chk.check("งบระยะทาง {0:.2f} m พอสำหรับขั้นแรก (ต้องขยับ {1:.3f} m "
-                  "จาก {2}mm ไป {3:.0f}mm)"
+                  "จาก {2}mm ไป {3:.0f}mm เหลือขอบ {4:.0f}mm)"
                   .format(tc.AIM_MAX_MOVE_M, need_m, tc.FRONT_STOP_MM,
-                          measured[0]),
-                  tc.AIM_MAX_MOVE_M >= need_m)
+                          measured[0], margin_mm),
+                  margin_mm >= AIM_BUDGET_MARGIN_MM)
     chk.check("งบระยะทางไม่เกินหนึ่งช่อง (ข้างหลังยืนยันว่าโล่งได้แค่นั้น)",
               tc.AIM_MAX_MOVE_M <= tc.CELL_SIZE_M)
 
