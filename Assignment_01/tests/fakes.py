@@ -273,6 +273,14 @@ class Corridor(object):
                                    and tof_mm < wall_mm)
         return snap
 
+    def read_tof_settled(self, samples=None):
+        """ระยะ ToF ตอนจอดนิ่ง
+
+        ทางตรงจำลองไม่มี noise ค่ามัธยฐานของหลายครั้งจึงเท่ากับค่าเดียว ณ ตอนนี้
+        และไม่ต้องรอระหว่างอ่าน เพราะ ``pos`` ขยับเฉพาะตอนมีคำสั่ง drive_speed
+        """
+        return None if self.tof_mm is None else float(self.tof_mm)
+
     @property
     def moves(self):
         """list: เฉพาะคำสั่งที่สั่งให้ขยับจริง ตัดคำสั่งหยุดออก"""
@@ -425,6 +433,14 @@ class TruthHub(object):
 
     def read_walls_settled(self, samples=None):
         return self.world.walls_here()
+
+    def read_tof_settled(self, samples=None):
+        """ระยะ ToF ตอนจอดนิ่ง - TruthWorld ตอบไม่ได้
+
+        TruthWorld รู้แค่ว่าหุ่นอยู่ช่องไหน ไม่มีตำแหน่งย่อยในช่อง จึงบอกระยะ
+        เป็นมิลลิเมตรไม่ได้ คืน None คือ "วัดไม่ได้"
+        """
+        return None
 
     def snapshot(self):
         front = self.world.walls_here()[0]

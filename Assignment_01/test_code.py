@@ -197,6 +197,10 @@ FRONT_WALL_MM_OVERRIDE = None   # ปกติปล่อย None ให้ค�
 TOF_MAX_VALID_MM = 4000         # เกินนี้ถือว่าอ่านไม่ได้ / ไม่มีอะไรอยู่ในระยะ
 WALL_VOTE_SAMPLES = 5           # อ่านกี่ครั้งตอนจอดนิ่ง ก่อนโหวตลงแผนที่
 WALL_VOTE_INTERVAL = 0.06
+# อ่าน ToF กี่ครั้งตอนจอดนิ่ง แล้วเอามัธยฐาน ใช้ตอนที่ต้องการ "ระยะ" จริง ๆ
+# (จัดระยะ / ตรวจกับแผนที่) ไม่ใช่แค่ "มีกำแพงไหม" ซึ่งใช้ WALL_VOTE_SAMPLES
+# มัธยฐานทนค่าโดด ๆ ได้ดีกว่าค่าเฉลี่ย ซึ่งสำคัญเพราะ ToF ให้ค่าหลุดเป็นครั้งคราว
+TOF_SETTLE_SAMPLES = 5
 
 # ---------- IR 45 องศา ----------
 # ใช้เป็นตัวกันชนจุดบอดทแยงหน้า (Sharp ยิงตรงข้าง ToF ยิงตรงหน้า มุมทแยงไม่มีใครดู)
@@ -229,6 +233,16 @@ KP_CENTER = 0.0006              # m/s ต่อ 1 หน่วย ADC error (ไ
 CENTER_DEADBAND_ADC = 15        # error ต่ำกว่านี้ถือว่ากลางช่องแล้ว
 MAX_STRAFE = 0.08               # m/s strafe สูงสุด
 ALIGN_TOLERANCE_MM = 18
+# จัดระยะซ้ำได้กี่รอบ ก่อนยอมรับตำแหน่งที่ได้
+#
+# รอบเดียวไม่พอเพราะ _travel หยุดตอนค่า ToF "ข้ามเกณฑ์" ไม่ใช่ตอนถึงเป้าพอดี
+# ระหว่างนั้นมีดีเลย์ของ DDS (1/DDS_FREQ วินาที) บวกคาบ control loop บวกระยะที่
+# หุ่นไหลต่อหลังสั่งหยุด รวมแล้วเลยเป้าไปทางเดียวเสมอไม่กี่มิลลิเมตร รอบที่สอง
+# วัดตอนจอดนิ่งด้วยค่ามัธยฐานแล้วเก็บส่วนที่เหลือ
+#
+# 2 พอสำหรับความคลาดเคลื่อนที่เป็นระบบแบบนี้ เพราะรอบที่สองขยับสั้นมากจนดีเลย์
+# แทบไม่มีผล ตั้งสูงกว่านี้คือยอมเสียเวลาไล่จับ noise ของเซนเซอร์ที่ไม่มีวันจบ
+ALIGN_MAX_PASSES = 2
 
 # ---------- การนับช่อง ----------
 CELL_COMPLETE_RATIO = 0.85      # เดินได้ >= 85% ของช่อง = ถือว่าเข้าช่องใหม่แล้ว
@@ -857,6 +871,33 @@ class SensorHub(object):
             t=now, tof_mm=tof_mm, adc_left=adc_left, adc_right=adc_right,
             ir_left=ir_left, ir_right=ir_right, yaw=yaw,
             pos_x=pos_x, pos_y=pos_y, fresh=(stale == ""), stale_reason=stale)
+
+    def read_tof_settled(self, samples=TOF_SETTLE_SAMPLES):
+        """float or None: ระยะ ToF หน่วย mm จากค่ามัธยฐานของหลายครั้งตอนจอดนิ่ง
+
+        ต่างจากการอ่าน ``snapshot().tof_mm` ครั้งเดียวตรงที่ทนค่าโดดได้ ใช้ทุกที่
+        ที่เอาตัวเลขไปตัดสินใจเรื่องระยะจริง ๆ ไม่ใช่แค่ถามว่ามีกำแพงหรือเปล่า
+
+        คืน None เมื่อครึ่งหนึ่งขึ้นไปอ่านไม่ได้ ซึ่งแปลว่าไม่มีอะไรอยู่ในระยะวัด
+        ไม่ใช่ค่าที่เชื่อได้แค่บางส่วน - ยอมบอกว่าไม่รู้ ดีกว่าคืนมัธยฐานของ
+        ตัวอย่างหยิบมือเดียวแล้วให้ผู้เรียกเข้าใจผิดว่าวัดได้
+
+        Args:
+            samples (int): จำนวนครั้งที่อ่าน
+
+        Returns:
+            float or None: ระยะหน่วย mm
+        """
+        samples = max(1, samples)
+        values = []
+        for _ in range(samples):
+            snap = self.snapshot()
+            if snap.tof_mm is not None:
+                values.append(snap.tof_mm)
+            time.sleep(WALL_VOTE_INTERVAL)
+        if len(values) * 2 <= samples:
+            return None
+        return float(statistics.median(values))
 
     def read_walls_settled(self, samples=WALL_VOTE_SAMPLES):
         """อ่านกำแพงหน้า/ซ้าย/ขวา ตอนหุ่นจอดนิ่งแล้ว โดยโหวตเสียงข้างมาก
@@ -1524,6 +1565,62 @@ class Driver(object):
         moved = math.hypot(snap.pos_x - start_x, snap.pos_y - start_y)
         return moved, reason
 
+    def _align_pass(self, target_mm, heading, budget_m, floor_mm, center,
+                    start_tof):
+        """จัดระยะหนึ่งรอบ ดู :meth:`align_to_wall` สำหรับความหมายของทุกอย่าง
+
+        แยกออกมาเพราะ ``align_to_wall`` เรียกซ้ำได้หลายรอบ ตัวนี้คือเนื้อของหนึ่ง
+        รอบ ตั้งแต่วัด ตัดสินทิศ ไปจนขยับเสร็จ
+
+        Args:
+            start_tof (float or None): ระยะที่วัดมาแล้วจากรอบก่อน None = วัดใหม่
+
+        Returns:
+            tuple: (tof_mm หลังจบรอบ, moved_m, reason)
+        """
+        floor = FRONT_STOP_MM if floor_mm is None else floor_mm
+        if start_tof is None:
+            start_tof = self.hub.read_tof_settled()
+        if start_tof is None:
+            print("[ALIGN] ToF ไม่เห็นกำแพงในระยะวัด จัดระยะไม่ได้")
+            return None, 0.0, "no_wall"
+
+        error_mm = start_tof - target_mm
+        if abs(error_mm) <= ALIGN_TOLERANCE_MM:
+            print("[ALIGN] ToF = {0:.0f}mm ตรงเป้า {1:.0f}mm อยู่แล้ว"
+                  .format(start_tof, target_mm))
+            return start_tof, 0.0, "already_there"
+        if budget_m <= 0.0:
+            print("[ALIGN] ToF = {0:.0f}mm ห่างเป้า {1:.0f}mm แต่ขยับไม่ได้ (งบ 0)"
+                  .format(start_tof, target_mm))
+            return start_tof, 0.0, "no_room"
+
+        # ToF มากกว่าเป้า = อยู่ไกลกำแพงเกินไป ต้องเดินหน้าเข้าหา และกลับกัน
+        forward = error_mm > 0
+        if forward and target_mm < floor:
+            print("[ALIGN] เป้า {0:.0f}mm ใกล้กว่าระยะต่ำสุด {1}mm ไม่เดินเข้าไป"
+                  .format(target_mm, floor))
+            return start_tof, 0.0, "below_floor"
+
+        # ขยับเกินระยะที่ผิดอยู่ไม่มีประโยชน์ เอาค่าที่น้อยกว่าเป็นงบระยะทาง
+        budget = min(abs(error_mm) / 1000.0, budget_m)
+        print("[ALIGN] ToF = {0:.0f}mm เป้า {1:.0f}mm -> {2} ไม่เกิน {3:.3f} m "
+              "(งบ {4:.3f} m)"
+              .format(start_tof, target_mm, "เดินหน้า" if forward else "ถอย",
+                      budget, budget_m))
+
+        if forward:
+            def reached(s):
+                return s.tof_mm is None or s.tof_mm <= max(target_mm, floor)
+        else:
+            def reached(s):
+                return s.tof_mm is None or s.tof_mm >= target_mm
+
+        speed = ALIGN_SPEED if forward else -ALIGN_SPEED
+        moved, reason = self._travel(speed, heading, budget, stop=reached,
+                                     center=center)
+        return None, moved, reason
+
     def align_to_wall(self, target_mm, heading, budget_m, floor_mm=None,
                       center=True):
         """เดินหน้าหรือถอยจนกำแพงที่หันหน้าใส่ห่างเท่ากับ target_mm
@@ -1556,58 +1653,53 @@ class Driver(object):
                 เมื่อแกนตั้งฉากถูกจัดตำแหน่งไปแล้ว
 
         Returns:
-            tuple: (tof_mm หลังจัด, moved_m, reason)
+            tuple: (tof_mm หลังจัด, moved_m, reason) โดย tof_mm เป็นค่ามัธยฐาน
+                ที่วัดตอนจอดนิ่งแล้ว ไม่ใช่ค่าดิบครั้งเดียวตอนกำลังเบรก
         """
-        floor = FRONT_STOP_MM if floor_mm is None else floor_mm
-        snap = self.hub.snapshot()
-        if snap.tof_mm is None:
-            print("[ALIGN] ToF ไม่เห็นกำแพงในระยะวัด จัดระยะไม่ได้")
-            return None, 0.0, "no_wall"
+        total_moved = 0.0
+        remaining = budget_m
+        tof = None
+        reason = "no_wall"
+        measured = None
 
-        error_mm = snap.tof_mm - target_mm
-        if abs(error_mm) <= ALIGN_TOLERANCE_MM:
-            print("[ALIGN] ToF = {0}mm ตรงเป้า {1}mm อยู่แล้ว"
-                  .format(snap.tof_mm, target_mm))
-            return snap.tof_mm, 0.0, "already_there"
-        if budget_m <= 0.0:
-            print("[ALIGN] ToF = {0}mm ห่างเป้า {1}mm แต่ขยับไม่ได้ (งบ 0)"
-                  .format(snap.tof_mm, target_mm))
-            return snap.tof_mm, 0.0, "no_room"
+        for attempt in range(1, ALIGN_MAX_PASSES + 1):
+            tof, moved, reason = self._align_pass(
+                target_mm, heading, remaining, floor_mm, center, measured)
+            total_moved += moved
+            remaining = max(0.0, remaining - moved)
+            if reason != "stop":
+                # ไม่ได้ขยับ หรือขยับไม่ได้ ทำซ้ำก็ได้ผลเดิม
+                break
 
-        # ToF มากกว่าเป้า = อยู่ไกลกำแพงเกินไป ต้องเดินหน้าเข้าหา และกลับกัน
-        forward = error_mm > 0
-        if forward and target_mm < floor:
-            print("[ALIGN] เป้า {0}mm ใกล้กว่าระยะต่ำสุด {1}mm ไม่เดินเข้าไป"
-                  .format(target_mm, floor))
-            return snap.tof_mm, 0.0, "below_floor"
+            # จบด้วย stop = ToF "ข้ามเกณฑ์" ระหว่างวิ่ง ซึ่งไม่ใช่ตำแหน่งสุดท้าย
+            # จริง ๆ เพราะยังมีระยะที่หุ่นไหลต่อหลังสั่งหยุด วัดใหม่ตอนจอดนิ่ง
+            measured = self.hub.read_tof_settled()
+            tof = measured
+            if measured is None:
+                print("[ALIGN] ขยับ {0:.3f} m แล้ว ToF อ่านไม่ได้ตอนจอดนิ่ง"
+                      .format(total_moved))
+                break
 
-        # ขยับเกินระยะที่ผิดอยู่ไม่มีประโยชน์ เอาค่าที่น้อยกว่าเป็นงบระยะทาง
-        budget = min(abs(error_mm) / 1000.0, budget_m)
-        print("[ALIGN] ToF = {0}mm เป้า {1}mm -> {2} ไม่เกิน {3:.3f} m "
-              "(งบ {4:.3f} m)"
-              .format(snap.tof_mm, target_mm, "เดินหน้า" if forward else "ถอย",
-                      budget, budget_m))
+            residual = measured - target_mm
+            print("[ALIGN] รอบที่ {0}: ขยับรวม {1:.3f} m แล้ว ToF = {2:.0f}mm "
+                  "(เป้า {3:.0f}mm เหลือ {4:+.0f}mm)"
+                  .format(attempt, total_moved, measured, target_mm, residual))
+            if abs(residual) <= ALIGN_TOLERANCE_MM:
+                break
+            if attempt >= ALIGN_MAX_PASSES:
+                print("[WARN] ครบ {0} รอบแล้วยังเหลือ {1:+.0f}mm "
+                      "(เกณฑ์ {2}mm) ใช้ตำแหน่งนี้ไปก่อน"
+                      .format(ALIGN_MAX_PASSES, residual, ALIGN_TOLERANCE_MM))
+                break
+            if remaining <= 0.0:
+                print("[WARN] ยังเหลือ {0:+.0f}mm แต่งบระยะทางหมดแล้ว"
+                      .format(residual))
+                reason = "budget"
+                break
 
-        if forward:
-            def reached(s):
-                return s.tof_mm is None or s.tof_mm <= max(target_mm, floor)
-        else:
-            def reached(s):
-                return s.tof_mm is None or s.tof_mm >= target_mm
-
-        speed = ALIGN_SPEED if forward else -ALIGN_SPEED
-        moved, reason = self._travel(speed, heading, budget, stop=reached,
-                                     center=center)
-
-        snap = self.hub.snapshot()
-        got = ("ไกลเกินระยะวัด" if snap.tof_mm is None
-               else "{0}mm".format(snap.tof_mm))
-        print("[ALIGN] ขยับ {0:.3f} m แล้ว ToF = {1} (เป้า {2}mm) เหตุที่จบ: {3}"
-              .format(moved, got, target_mm, "ถึงเป้า" if reason == "stop"
-                      else reason))
         if reason == "budget":
             print("[WARN] ใช้งบระยะทางหมดก่อนถึงเป้า ตำแหน่งยังไม่ตรงที่ตั้งไว้")
-        return snap.tof_mm, moved, reason
+        return tof, total_moved, reason
 
     def back_off_from_wall(self, clearance_mm, heading, limit_m):
         """ถอยจนกำแพงหน้าห่าง "อย่างน้อย" clearance_mm เพื่อเปิดที่ให้แขนยื่น
