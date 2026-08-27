@@ -149,12 +149,12 @@ IR_RIGHT_45 = (3, 1)            # (hub_id, port) อ่านด้วย IO (di
 # ตราบใดที่ยังเป็น None โปรแกรมจะปฏิเสธที่จะวิ่งในสนามจริง
 # เหตุผล: threshold ที่ผิดทำให้หุ่น "วิ่งดูปกติทุกอย่างแต่สร้างแผนที่ผิด"
 # ซึ่งแยกไม่ออกจากบั๊กของ odometry หรือของ flood fill ตอนอยู่หน้าสนาม
-SHARP_LEFT_WALL_ADC = (455, 339)      # (enter, exit) ทำ hysteresis กันค่ากระพริบ
-SHARP_RIGHT_WALL_ADC = (404, 394)    # (enter, exit)
-SHARP_LEFT_REF = 397     # ค่า ADC ซ้าย ตอนหุ่นอยู่กลางช่องพอดี
-SHARP_RIGHT_REF = 412          # ค่า ADC ขวา ตอนหุ่นอยู่กลางช่องพอดี
+SHARP_LEFT_WALL_ADC = (372, 358)      # (enter, exit) ทำ hysteresis กันค่ากระพริบ
+SHARP_RIGHT_WALL_ADC = (442, 430)    # (enter, exit)
+SHARP_LEFT_REF = 368     # ค่า ADC ซ้าย ตอนหุ่นอยู่กลางช่องพอดี
+SHARP_RIGHT_REF = 436          # ค่า ADC ขวา ตอนหุ่นอยู่กลางช่องพอดี
 IR_TRIGGERED_VALUE = 0       # ค่า IO ตอนมีสิ่งกีดขวาง (0 หรือ 1)
-FRONT_STOP_MM = 95           # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
+FRONT_STOP_MM = 65         # ToF ที่อ่านได้ตอนหุ่นอยู่กลางช่องและหันชนกำแพง
 
 FRONT_WALL_MM_OVERRIDE = None   # ปกติปล่อย None ให้คำนวณจากเรขาคณิตของช่อง
 
